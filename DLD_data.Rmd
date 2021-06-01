@@ -1,0 +1,441 @@
+---
+title: "DLD data analysis"
+author: "Jack Jewson"
+date: "27 May 2021"
+output: html_document
+---
+
+Code to reproduce the DLD data analysis in Section 5.3.2 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+
+library(actuar)
+library(VGAM)
+library(matrixStats)
+library(bridgesampling)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(mvtnorm)
+library(lmf)
+
+```
+
+### Hessian Functions and Priors
+
+Loading functions to set the priors and evaluate the Laplace approximations of the $\mathcal{H}$-score.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("HScore_fns_grads_hess.R")
+source("priors.R")
+```
+
+## DLD data {.tabset}
+
+### Data Loading
+
+Loading the data and defining the response and set of possible predictors.
+
+```{r DLD_dataload, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+setwd(paste(my.dir, "/data", sep = ""))
+
+dld_data <- read.table("dld.txt", header = TRUE, sep = '\t')
+
+dld_y <- as.vector(scale(dld_data[,1]))
+dld_X <- cbind(scale(as.matrix(dld_data[,c(-1, -56, -57, -58)])), as.matrix(dld_data[,c(56, 57, 58)]))
+
+n_obs_dld <- length(dld_y)
+n_obs_dld
+p_dim_dld <- ncol(dld_X)
+
+```
+
+### Data Preprocessing: PCA variable selection
+
+A principal components analysis of the set of predictors for DLD. Selecting the 5 variables with the highest loading in each of the first three principal components.
+
+```{r DLD_PCA, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+PCA_dld_X <- princomp(dld_X)
+
+PCA_selected_names <- unique(c(names(sort(abs(PCA_dld_X$loadings[,1]), decreasing = TRUE)[1:5]),
+names(sort(abs(PCA_dld_X$loadings[,2]), decreasing = TRUE)[1:5])
+, names(sort(abs(PCA_dld_X$loadings[,3]), decreasing = TRUE)[1:5])
+))
+
+index_PCA_selected <- rep(NA, 15)
+for(i in 1:15){
+  index_PCA_selected[i] <- which(colnames(dld_X) == PCA_selected_names[i])
+}
+
+index_PCA_selected <- sort(index_PCA_selected)
+
+index_PCA_selected
+
+dld_X_sparse <- cbind(rep(1, n_obs_dld), dld_X[,index_PCA_selected])
+
+p_dim_sparse_dld <- ncol(dld_X_sparse)
+
+p_dim_sparse_dld
+
+```
+
+Calculating the Gaussian MLE value to provide inital values for the MAP optimisation. Further, re-scaling the $y$'s in order to avoid instabilities from their conditional variance being so small. 
+
+```{r dld_PCA_var_adjust, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+MLE_dld_sparse <- lm(dld_y ~ dld_X_sparse + 0)
+
+(summary(MLE_dld_sparse)$sigma)**2
+
+dld_y_scaled <- dld_y / (summary(MLE_dld_sparse)$sigma)
+
+MLE_dld_sparse_scaled  <- lm(dld_y_scaled  ~ dld_X_sparse + 0)
+
+
+```
+
+### Prior Specification
+
+Specifying the prior hyperparameters.
+
+```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+mu_0 <- 0
+v_0 <- 5
+a_0 <- 2.01
+b_0 <- 0.5
+
+nu_NLP_a_0 <- a_0_nu_NLP_select
+nu_NLP_b_0 <- b_0_nu_NLP_select
+
+nu_a_0 <- 0
+nu_b_0 <- 0
+
+
+```
+
+### stan file compilations
+
+Loading and compiling .stan programs to obtain the MAP point estimates for the Laplace approximations
+
+```{r stan_files, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+setwd(paste(my.dir, "/stan", sep = ""))
+
+Hyvarinen_Bayesnorm_linearmodel_stan <- stan_model(file = "Hyvarinen_Bayesnorm_linearmodel.stan")
+Hyvarinen_Bayesnorm_linearmodel_noPrior_stan <- stan_model(file="Hyvarinen_Bayesnorm_linearmodel_noPrior.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior.stan")
+
+N_MCMC <- 1000
+```
+
+### Gaussian model
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_dld, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+Hyvarinen_Bayesnorm_linearmodel_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled, nrow = n_obs_dld, ncol = 1), X = dld_X_sparse, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+Hyvarinen_Bayesnorm_linearmodel_dld <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_dld
+, init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2)
+, hessian = TRUE
+)
+
+phi_star_squared_error_dld <- Hyvarinen_Bayesnorm_linearmodel_dld$par[1:(p_dim_sparse_dld + 1)]
+    
+
+### evaluating P_star
+H_star_squared_error_dld <- sum(H_score_norm(x = dld_y_scaled, mu = dld_X_sparse%*%phi_star_squared_error_dld[1:p_dim_sparse_dld], sigma2 = phi_star_squared_error_dld[p_dim_sparse_dld + 1], w = 1))
+mlog_pi0_star_squared_error_dld <- NIG_mlog_prior_regression(beta = phi_star_squared_error_dld[1:p_dim_sparse_dld], sigma2 = phi_star_squared_error_dld[p_dim_sparse_dld + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_dld), kappa_0 = 1/v_0)
+  
+log_P_star_squared_error_dld <- - H_star_squared_error_dld - mlog_pi0_star_squared_error_dld
+
+### Hessians
+hessian_H_star_squared_error_dld <- apply(hess_H_score_norm_regression(y = dld_y_scaled, X = dld_X_sparse, beta = phi_star_squared_error_dld[1:p_dim_sparse_dld], sigma2 = phi_star_squared_error_dld[p_dim_sparse_dld + 1]), c(1, 2), sum)
+hessian_mlog_pi0_star_squared_error_dld <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_dld[1:p_dim_sparse_dld], sigma2 = phi_star_squared_error_dld[p_dim_sparse_dld + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_dld), kappa_0 = 1/v_0)
+  
+A_star_squared_error_dld <- -(- hessian_mlog_pi0_star_squared_error_dld - hessian_H_star_squared_error_dld)
+  
+### Lapalce Approximation 
+hat_H_score_squared_error_dld <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_dld, A = A_star_squared_error_dld, p = p_dim_sparse_dld + 1)
+  
+
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_dld, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+  
+Hyvarinen_Bayesnorm_linearmodel_noPrior_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled, nrow = n_obs_dld, ncol = 1), X = dld_X_sparse, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+Hyvarinen_Bayesnorm_linearmodel_noPrior_dld <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_dld
+, init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2)
+#, hessian = TRUE
+ )
+
+phi_star_squared_error_noPrior_dld <- Hyvarinen_Bayesnorm_linearmodel_noPrior_dld$par[1:(p_dim_sparse_dld + 1)]
+    
+
+SMIC_H_score_squared_error_dld <- SMIC_H_score_norm_regression(y = dld_y_scaled, X = dld_X_sparse, beta = phi_star_squared_error_noPrior_dld[1:p_dim_sparse_dld], sigma2 = phi_star_squared_error_noPrior_dld[p_dim_sparse_dld + 1])
+  
+
+```
+
+### Tukey's loss, nu, non-local prior
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_dld, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled, nrow = n_obs_dld, ncol = 1), X = dld_X_sparse, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_dld <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_dld
+, init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2, nu = 1/3^2)
+, hessian = TRUE
+#  , verbose = TRUE
+)
+  
+phi_star_Tukeys_nu_NLP_absapprox_dld <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_dld$par[1:(p_dim_sparse_dld + 2)]
+    
+### evaluating P_star
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_dld), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+
+H_star_Tukeys_nu_NLP_absapprox_dld <- sum(H_score_tukey_varThresh_absapprox(x = dld_y_scaled, mu = dld_X_sparse%*%phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2]), k_abs = 100, k_sigmoid = 100))
+  
+log_P_star_Tukeys_nu_NLP_absapprox_dld <- - H_star_Tukeys_nu_NLP_absapprox_dld - mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld
+  
+### Hessians
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld <- matrix(NA, nrow = (p_dim_sparse_dld + 2), ncol = (p_dim_sparse_dld + 2))
+
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld[ 1:(p_dim_sparse_dld + 1), 1:(p_dim_sparse_dld + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_dld), kappa_0 = 1/v_0)
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld[ (p_dim_sparse_dld + 2), ] <- 0
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld[ , (p_dim_sparse_dld + 2)] <- 0
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld[ (p_dim_sparse_dld + 2), (p_dim_sparse_dld + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+hessian_H_star_Tukeys_nu_NLP_absapprox_dld <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = dld_y_scaled, X = dld_X_sparse, beta =  phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+A_star_Tukeys_nu_NLP_absapprox_dld <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_dld - hessian_H_star_Tukeys_nu_NLP_absapprox_dld)
+  
+A_star_Tukeys_nu_NLP_absapprox_dld_nearPD <- nearPD(A_star_Tukeys_nu_NLP_absapprox_dld)
+  
+### Lapalce Approximation 
+hat_H_score_Tukeys_nu_NLP_absapprox_dld <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_dld, A = A_star_Tukeys_nu_NLP_absapprox_dld_nearPD, p = p_dim_sparse_dld + 2)
+  
+    
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_dld, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled, nrow = n_obs_dld, ncol = 1), X = dld_X_sparse, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_dld <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_dld
+, init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+phi_star_Tukeys_nu_absapprox_noPrior_dld <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_dld$par[1:(p_dim_sparse_dld + 2)]
+
+SMIC_H_score_Tukeys_nu_absapprox_dld <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = dld_y_scaled, X = dld_X_sparse, beta = phi_star_Tukeys_nu_absapprox_noPrior_dld[1:p_dim_sparse_dld], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_dld[p_dim_sparse_dld + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_dld[p_dim_sparse_dld + 2], k_abs = 100, k_sigmoid = 100)
+  
+    
+```
+
+### Selection
+
+$\mathcal{H}$-score (maximising) and SMIC (minimising) selection.
+
+```{r dld_experiments_H_score_TukeysBayesnorm_varThresh_lm_diag, include=TRUE,echo=TRUE, eval=TRUE, cache=FALSE}
+
+
+hat_H_score_squared_error_dld
+hat_H_score_Tukeys_nu_NLP_absapprox_dld
+
+SMIC_H_score_squared_error_dld
+SMIC_H_score_Tukeys_nu_absapprox_dld
+
+
+```
+
+### Parameter Estimates
+
+MAP parameter estimates under the Gaussian model and Tukey's loss improper model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox_nu_LP_vs_NLP_dld, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+#### beta's ####
+
+plot(1:p_dim_sparse_dld, phi_star_squared_error_dld[1:p_dim_sparse_dld], type = "b", lwd = 3, col = "red", xlab = expression(paste(beta, " index")), ylab = expression(hat(beta)), main = "", ylim = c(-1, 3))
+points(1:p_dim_sparse_dld, phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], type = "b", lwd = 3, col = "dark green")
+legend("topleft",c("Gaussian", "Tukey's - NLP"), col = c("red", "dark green"), lwd = rep(3, 3), lty = c(1, 1, 1), bg = "white")
+
+
+plot(1:p_dim_sparse_dld, phi_star_squared_error_dld[1:p_dim_sparse_dld] - phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld], type = "b", lwd = 3, col = "dark green", xlab = expression(paste(beta, " index")), ylab = expression(hat(beta)[LS] - hat(beta)[T]), main = "", ylim = c(-2, 2))#, ylim = c(-2, 2)))
+abline(h = 0, lwd = 3, lty = 2, col = "grey")
+legend("topleft",c("Gaussian - Tukey's - NLP"), col = c("dark green"), lwd = rep(3, 3), lty = c(1, 1, 1), bg = "white")
+
+phi_star_squared_error_dld[p_dim_sparse_dld + 1]
+phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1]
+phi_star_Tukeys_nu_absapprox_noPrior_dld[p_dim_sparse_dld + 1]
+
+1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2])
+1/sqrt(phi_star_Tukeys_nu_absapprox_noPrior_dld[p_dim_sparse_dld + 2])
+
+```
+
+
+### Boostrap variance estimates
+
+Estimating parameter variances by bootstrap resampling the observed data.
+
+#### Gaussian model
+
+First for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_bootstrap_dld, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+B <- 500
+
+phi_star_squared_error_bootstrap_dld <- array(NA, dim = c(B, p_dim_sparse_dld + 1))## parameters
+return_code_squared_error_bootstrap_dld <- array(NA, dim = c(B))## Optimisation errors
+
+for(b in 1:B){
+      
+  ## Resample the data
+  boot_indicies <- sample(1:n_obs_dld, n_obs_dld, replace = TRUE)
+
+  Hyvarinen_Bayesnorm_linearmodel_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled[boot_indicies], nrow = n_obs_dld, ncol = 1), X = dld_X_sparse[boot_indicies,], mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_dld <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_dld
+  , init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2)
+  , hessian = TRUE
+  )
+
+  return_code_squared_error_bootstrap_dld[b] <- Hyvarinen_Bayesnorm_linearmodel_dld$return_code
+  phi_star_squared_error_bootstrap_dld[b,] <- Hyvarinen_Bayesnorm_linearmodel_dld$par[1:(p_dim_sparse_dld + 1)]
+    
+  
+  if((b %% (B/10)) == 1){
+    cat("Bootstrap", b, "done", "\n")
+  }
+}
+
+optim_valid <- which(return_code_squared_error_bootstrap_dld == 0)
+    
+boostrap_means_squared_error_dld <- colMeans(phi_star_squared_error_bootstrap_dld[optim_valid, ])
+boostrap_vars_squared_error_dld <- colVars(phi_star_squared_error_bootstrap_dld[optim_valid, ])
+
+```
+
+#### Tukey's loss, nu, non-local prior
+
+Then for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_bootstrap_dld, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+B <- 500
+
+phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld <- array(NA, dim = c(B, p_dim_sparse_dld + 2))## parameters
+return_code_Tukeys_nu_NLP_absapprox_bootstrap_dld <- array(NA, dim = c(B))## Optimisation errors
+
+for(b in 1:B){
+      
+  ## Resample the data
+  boot_indicies <- sample(1:n_obs_dld, n_obs_dld, replace = TRUE)
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_dld <- list(n = n_obs_dld, p = p_dim_sparse_dld, y = as.matrix(dld_y_scaled[boot_indicies], nrow = n_obs_dld, ncol = 1), X = dld_X_sparse[boot_indicies,], mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_dld <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_dld
+  , init = list(beta = MLE_dld_sparse_scaled$coefficients, sigma2 = (summary(MLE_dld_sparse_scaled)$sigma)**2, nu = 1/3^2)
+  , hessian = TRUE
+# , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_bootstrap_dld[b] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_dld$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld[b, ] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_dld$par[1:(p_dim_sparse_dld + 2)]
+    
+  if((b %% (B/10)) == 1){
+    cat("Bootstrap", b, "done", "\n")
+  }
+}
+
+optim_valid <- which(return_code_Tukeys_nu_NLP_absapprox_bootstrap_dld == 0)
+    
+boostrap_means_Tukeys_nu_NLP_absapprox_dld <- c(colMeans(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld[optim_valid, 1:(p_dim_sparse_dld + 1)]), mean(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld[optim_valid, (p_dim_sparse_dld + 2)])))
+boostrap_vars_Tukeys_nu_NLP_absapprox_dld <- c(colVars(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld[optim_valid, 1:(p_dim_sparse_dld + 1)]), var(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_dld[optim_valid, (p_dim_sparse_dld + 2)])))
+
+```
+
+### Plots from the paper
+
+Producing the plots for Figures 4 and A.2 of the paper.
+
+```{r DLD_Gaussian_Tukeys_Comparison, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.3, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+
+x_seq <- seq(-20, 20, length.out = 2000)
+
+dld_density_squared_error_fun <- approxfun(density((dld_y_scaled - dld_X_sparse%*%phi_star_squared_error_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_squared_error_dld[p_dim_sparse_dld + 1])))
+dld_max_density_squared_error_fun <- max(dld_density_squared_error_fun((dld_y_scaled - dld_X_sparse%*%phi_star_squared_error_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_squared_error_dld[p_dim_sparse_dld + 1])))
+
+hist((dld_y_scaled - dld_X_sparse%*%phi_star_squared_error_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_squared_error_dld[p_dim_sparse_dld + 1]), breaks = 30, probability = TRUE, main = paste("DLD data, $\\tilde{\\mathcal{H}}_1(y_{1:192}) = $", round(hat_H_score_squared_error_dld,2)), xlab = "$(y - X\\hat{\\beta})/\\hat{\\sigma}$")
+points(x_seq, dnorm(x_seq, 0, 1)*dld_max_density_squared_error_fun/dnorm(0, 0, 1), lwd = 3, type = "l", lty = 1, col = "red")
+box()
+ 
+dld_density_Tukeys_nu_NLP_absapprox_fun <- approxfun(density((dld_y_scaled - dld_X_sparse%*%phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1])))
+dld_max_density_Tukeys_nu_NLP_absapprox_fun <- max(dld_density_Tukeys_nu_NLP_absapprox_fun((dld_y_scaled - dld_X_sparse%*%phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1])))
+
+hist((dld_y_scaled - dld_X_sparse%*%phi_star_Tukeys_nu_NLP_absapprox_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 1]), breaks = 50, probability = TRUE, main = paste("DLD data: $\\kappa = $ ", round(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2]),2), ", $\\tilde{\\mathcal{H}}_2(y_{1:192}) = $ ", round(hat_H_score_Tukeys_nu_NLP_absapprox_dld,2), sep = ""), xlab = "$(y - X\\hat{\\beta})/\\hat{\\sigma}$", ylab = "(Pseudo) Density")
+points(x_seq, dnorm(x_seq, 0, 1), lwd = 3, type = "l", lty = 2, col = "grey")
+points(x_seq, exp(log_score_tukey_varThresh(x_seq, 0, 1, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2]))) * dld_max_density_Tukeys_nu_NLP_absapprox_fun/exp(log_score_tukey_varThresh(0, 0, 1, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_dld[p_dim_sparse_dld + 2]))), lwd = 3, type = "l", lty = 1, col = "dark green")
+box()
+
+## Normal QQ-plots
+
+qqnorm((dld_y_scaled - dld_X_sparse%*%phi_star_squared_error_dld[1:p_dim_sparse_dld]) / sqrt(phi_star_squared_error_dld[p_dim_sparse_dld + 1]))
+abline(a = 0, b = 1, lwd = 3, col = "grey", lty = 2)
+
+## Mean-squared error
+
+plot(0:(p_dim_sparse_dld - 1), (phi_star_squared_error_dld[1:(p_dim_sparse_dld)] - phi_star_Tukeys_nu_NLP_absapprox_dld[1:(p_dim_sparse_dld)])^2, type = "b", lwd = 3, col = "black", xlab = "Parameter index", ylab = "Difference: Tukey's - Gaussian", main = "", ylim = c(-0.5, 1))
+points(0:(p_dim_sparse_dld - 1), (boostrap_vars_Tukeys_nu_NLP_absapprox_dld[ 1:(p_dim_sparse_dld)] - boostrap_vars_squared_error_dld[1:(p_dim_sparse_dld)]), col = "grey", lwd = 3, type = "b", lty = 2)
+abline(h = 0, lwd = 1, lty = 2, col = "black")
+
+
+
+```
+
+

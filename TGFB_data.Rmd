@@ -1,0 +1,493 @@
+---
+title: "TGFB data analysis"
+author: "Jack Jewson"
+date: "27 May 2021"
+output: html_document
+---
+
+Code to reproduce the TGF-$\beta$ data analysis in Section 5.3.1 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+
+library(actuar)
+library(VGAM)
+library(matrixStats)
+library(bridgesampling)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(mvtnorm)
+
+## https://bioconductor.org/packages/release/data/annotation/html/hgu133plus2.db.html
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("hgu133plus2.db")
+
+library(hgu133plus2.db)
+
+#BiocManager::install("KEGGREST")
+
+library(KEGGREST)
+library(org.Hs.eg.db)
+
+
+
+```
+
+### Hessian Functions and Priors
+
+Loading functions to set the priors and evaluate the Laplace approximations of the H-score.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("HScore_fns_grads_hess.R")
+source("priors.R")
+
+```
+
+## TGFB172 data {.tabset}
+
+### Data Loading
+
+Loading the data and defining the response and set of possible predictors.
+
+```{r TGFB172_dataload, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+setwd(paste(my.dir, "/data", sep = ""))
+
+tgfb10000_data <- read.table("tgfb_10000.txt", header = TRUE, sep='\t')
+
+
+tgfb10000_y <- as.vector(tgfb10000_data[,1])
+tgfb10000_X <- cbind(1,as.matrix(tgfb10000_data[,-1]))
+
+n_obs_tgfb10000 <- length(tgfb10000_y)
+p_dim_tgfb10000 <- ncol(tgfb10000_X)
+
+n_obs_tgfb10000
+```
+
+### Data preprocessing
+
+Identifying the genes available in the set of predictors that appear in the ‘TGF-B1 pathway’.
+
+#### Gene symbols and KEGG gene ids from the dataset
+
+Identifying the gene symbols corresponding to each variable in the data and transforming these into the KEGG number.
+
+```{r TGFB172_gene_symbols, include=TRUE, echo=TRUE, eval=TRUE, cache=TRUE}
+
+gene_symbol10000 <- rep(NA, p_dim_tgfb10000 - 1) ## -1 because of the intercept 
+for(i in 1:(p_dim_tgfb10000 - 1)){
+  gene_symbol10000[i] <- mget(sub("X", "", colnames(tgfb10000_data)[1 + i]), hgu133plus2SYMBOL)[[1]] #gene symbol
+}
+
+NA_IDs <- which(is.na(gene_symbol10000) == TRUE)
+sym_data10000 = gene_symbol10000[-NA_IDs]    
+EG_IDs_data = mget(sym_data10000, revmap(org.Hs.egSYMBOL), ifnotfound = NA)
+
+EG_ICs_data <- unlist(EG_IDs_data)
+
+```
+
+#### KEGG gene pathways
+
+Identifying the genes that appear in the ‘TGF-B1 pathway’.
+
+```{r KEGG_gene_pathways, include=TRUE, echo=TRUE, eval=TRUE, cache=TRUE}
+
+TGFB_query <- keggGet(c("hsa:7040")) # https://www.genome.jp/dbget-bin/www_bget?hsa:7040+hsa:7042+hsa:7043
+
+TGFB_pathway_KEGGNumbers <- rep(NA, length(TGFB_query[[1]]$PATHWAY))
+for(i in 1:length(TGFB_query[[1]]$PATHWAY)){
+  TGFB_pathway_KEGGNumbers[i] <- sub("hsa0", "", names(TGFB_query[[1]]$PATHWAY)[i])
+}
+
+```
+
+#### Gene symbol to KEGG gene ids
+
+Intersecting the ‘TGF-B1 pathway’ with the available set of predictors.
+
+```{r Gene_symbol_to_KEGG_gene_pathways, include=TRUE, echo=TRUE, eval=TRUE, cache=TRUE}
+
+
+
+pathway_data <- intersect(TGFB_pathway_KEGGNumbers, EG_ICs_data)
+
+ID10000_pathway <- rep(NA, length(pathway_data))
+for(i in 1:length(pathway_data)){
+  ID10000_pathway[i] <- which(EG_ICs_data == pathway_data[i])
+}
+
+ID10000_pathway <- sort(ID10000_pathway)
+
+tgfb10000_X_pathway <- tgfb10000_X[, - c(1 + NA_IDs)][,c(1, 1 + ID10000_pathway)]
+
+p_dim_sparse_tgfb1000 <- ncol(tgfb10000_X_pathway)
+
+p_dim_sparse_tgfb1000
+
+detach("package:hgu133plus2.db",  unload=TRUE)
+detach("package:KEGGREST",  unload=TRUE)
+detach("package:org.Hs.eg.db",  unload=TRUE)
+```
+
+#### MLE values
+
+Calculating the Gaussian MLE value to provide initial values for the MAP optimisation.
+
+```{r tgfb10000_pathway_indicies_MLE, include=TRUE, echo=TRUE, eval=TRUE, cache=TRUE}
+
+MLE_tgfb10000_pathway <- lm(tgfb10000_y ~ tgfb10000_X_pathway + 0)
+
+```
+
+### Prior Specification
+
+Specifying the prior hyperparameters.
+
+```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+mu_0 <- 0
+v_0 <- 5
+a_0 <- 2.01
+b_0 <- 0.5
+
+nu_NLP_a_0 <- a_0_nu_NLP_select
+nu_NLP_b_0 <- b_0_nu_NLP_select
+
+nu_a_0 <- 0
+nu_b_0 <- 0
+
+
+```
+
+### stan file compilations
+
+Loading and compiling .stan programs to obtain the MAP point estimates for the Laplace approximations
+
+```{r stan_files, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+setwd(paste(my.dir, "/stan", sep = ""))
+
+Hyvarinen_Bayesnorm_linearmodel_stan <- stan_model(file = "Hyvarinen_Bayesnorm_linearmodel.stan")
+Hyvarinen_Bayesnorm_linearmodel_noPrior_stan <- stan_model(file="Hyvarinen_Bayesnorm_linearmodel_noPrior.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior.stan")
+
+N_MCMC <- 1000
+```
+
+
+### Gaussian model
+
+Laplace approximation to the H-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_tgfb172, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+Hyvarinen_Bayesnorm_linearmodel_data_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y, nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+Hyvarinen_Bayesnorm_linearmodel_tgfb172 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_tgfb172
+  , init = list(beta = MLE_tgfb10000_pathway$coefficients, sigma2 = (summary(MLE_tgfb10000_pathway)$sigma)**2)
+  , hessian = TRUE
+  )
+
+phi_star_squared_error_tgfb172 <- Hyvarinen_Bayesnorm_linearmodel_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 1)]
+    
+
+### evaluating P_star
+H_star_squared_error_tgfb172 <- sum(H_score_norm(x = tgfb10000_y, mu = tgfb10000_X_pathway%*%phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1], w = 1))
+
+mlog_pi0_star_squared_error_tgfb172 <- NIG_mlog_prior_regression(beta = phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_tgfb1000), kappa_0 = 1/v_0)
+  
+log_P_star_squared_error_tgfb172 <- - H_star_squared_error_tgfb172 - mlog_pi0_star_squared_error_tgfb172
+
+### Hessians
+hessian_H_star_squared_error_tgfb172 <- apply(hess_H_score_norm_regression(y = tgfb10000_y, X = tgfb10000_X_pathway, beta = phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1]), c(1, 2), sum)
+hessian_mlog_pi0_star_squared_error_tgfb172 <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_tgfb1000), kappa_0 = 1/v_0)
+  
+A_star_squared_error_tgfb172 <- -(- hessian_mlog_pi0_star_squared_error_tgfb172 - hessian_H_star_squared_error_tgfb172)
+
+### Lapalce Approximation 
+hat_H_score_squared_error_tgfb172 <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_tgfb172, A = A_star_squared_error_tgfb172, p = p_dim_sparse_tgfb1000 + 1)
+  
+
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_true_tgfb172, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y, nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+Hyvarinen_Bayesnorm_linearmodel_noPrior_true_tgfb172 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_tgfb172
+  , init = list(beta = MLE_tgfb10000_pathway$coefficients, sigma2 = (summary(MLE_tgfb10000_pathway)$sigma)**2)
+#, hessian = TRUE
+  )
+
+phi_star_squared_error_noPrior_true_tgfb172 <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 1)]
+    
+SMIC_H_score_squared_error_true_tgfb172 <- SMIC_H_score_norm_regression(y = tgfb10000_y, X = tgfb10000_X_pathway, beta = phi_star_squared_error_noPrior_true_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_squared_error_noPrior_true_tgfb172[p_dim_sparse_tgfb1000 + 1])
+  
+
+```
+
+### Tukey's loss, nu, non-local prior
+
+Laplace approximation to the H-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_tgfb172, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y, nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_tgfb172 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_tgfb172
+, init = list(beta = MLE_tgfb10000_pathway $coefficients, sigma2 = (summary(MLE_tgfb10000_pathway )$sigma)**2, nu = 1/3^2)
+, hessian = TRUE
+#  , verbose = TRUE
+)
+  
+phi_star_Tukeys_nu_NLP_absapprox_tgfb172 <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 2)]
+    
+### evaluating P_star
+H_star_Tukeys_nu_NLP_absapprox_tgfb172 <- sum(H_score_tukey_varThresh_absapprox(x = tgfb10000_y, mu = tgfb10000_X_pathway%*%phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2]), k_abs = 100, k_sigmoid = 100))
+  
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172 <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_tgfb1000), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+
+log_P_star_Tukeys_nu_NLP_absapprox_tgfb172 <- - H_star_Tukeys_nu_NLP_absapprox_tgfb172 - mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172
+  
+### Hessians
+hessian_H_star_Tukeys_nu_NLP_absapprox_tgfb172 <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = tgfb10000_y, X = tgfb10000_X_pathway, beta =  phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172 <- matrix(NA, nrow = (p_dim_sparse_tgfb1000 + 2), ncol = (p_dim_sparse_tgfb1000 + 2))
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172[1:(p_dim_sparse_tgfb1000 + 1), 1:(p_dim_sparse_tgfb1000 + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim_sparse_tgfb1000), kappa_0 = 1/v_0)
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172[(p_dim_sparse_tgfb1000 + 2), ] <- 0
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172[ , (p_dim_sparse_tgfb1000 + 2)] <- 0
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172[ (p_dim_sparse_tgfb1000 + 2), (p_dim_sparse_tgfb1000 + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+  
+A_star_Tukeys_nu_NLP_absapprox_tgfb172 <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_tgfb172 - hessian_H_star_Tukeys_nu_NLP_absapprox_tgfb172)
+  
+#A_star_Tukeys_nu_NLP_absapprox_tgfb172_nearPD <- nearPD(A_star_Tukeys_nu_NLP_absapprox_tgfb172)
+  
+### Lapalce Approximation 
+
+hat_H_score_Tukeys_nu_NLP_absapprox_tgfb172 <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_tgfb172, A = A_star_Tukeys_nu_NLP_absapprox_tgfb172, p = p_dim_sparse_tgfb1000 + 2)
+  
+
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_true_tgfb172, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y, nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_tgfb172 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_tgfb172
+  , init = list(beta = MLE_tgfb10000_pathway $coefficients, sigma2 = (summary(MLE_tgfb10000_pathway )$sigma)**2, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+)
+  
+phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172 <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 2)]
+
+SMIC_H_score_Tukeys_nu_absapprox_true_tgfb172 <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = tgfb10000_y, X = tgfb10000_X_pathway, beta = phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172[1:p_dim_sparse_tgfb1000], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172[p_dim_sparse_tgfb1000 + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172[p_dim_sparse_tgfb1000 + 2], k_abs = 100, k_sigmoid = 100)
+  
+
+```
+
+### Selection
+
+H-score (maximising) and SMIC (minimising) selection.
+
+```{r tgfb172_experiments_H_score_TukeysBayesnorm_varThresh_lm_diag_selection, include=TRUE,echo=TRUE, eval=TRUE, cache=FALSE}
+
+## H-score
+
+hat_H_score_squared_error_tgfb172
+hat_H_score_Tukeys_nu_NLP_absapprox_tgfb172
+
+## SMIC 
+
+SMIC_H_score_squared_error_true_tgfb172
+SMIC_H_score_Tukeys_nu_absapprox_true_tgfb172
+
+
+```
+
+### Parameter Estimates
+
+MAP parameter estimates under the Gaussian model and Tukey's loss improper model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox__nu_LP_vs_NLP_tgfb172, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+#### beta's ####
+
+plot(1:p_dim_sparse_tgfb1000, phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], type = "b", lwd = 3, col = "red", xlab = expression(paste(beta, " index")), ylab = expression(hat(beta)), main = "", ylim = c(-1, 2))
+points(1:p_dim_sparse_tgfb1000, phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], type = "b", lwd = 3, col = "dark green")
+legend("topright",c("Gaussian", "Tukey's - NLP"), col = c("red", "dark green"), lwd = rep(3, 3), lty = c(1, 1, 1), bg = "white")
+
+
+plot(1:p_dim_sparse_tgfb1000, phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000], type = "b", lwd = 3, col = "red", xlab = expression(paste(beta, " index")), ylab = expression(hat(beta)), main = "", ylim = c(-0.4, 0.6))
+points(1:p_dim_sparse_tgfb1000, phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000], type = "b", lwd = 3, col = "dark green")
+legend("topright",c("Gaussian", "Tukey's - LP", "Tukey's - NLP"), col = c("red", "green", "dark green"), lwd = rep(3, 3), lty = c(1, 1, 1), bg = "white")
+
+phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1]
+phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1]
+phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172[p_dim_sparse_tgfb1000 + 1]
+
+1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2])
+1/sqrt(phi_star_Tukeys_nu_absapprox_noPrior_true_tgfb172[p_dim_sparse_tgfb1000 + 2])
+
+```
+
+### Boostrap variance estimates
+
+Estimating parameter variances by bootstrap resampling the observed data.
+
+#### Gaussian model
+
+First for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_bootstrap_tgfb172, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+B <- 500
+
+phi_star_squared_error_bootstrap_tgfb172 <- array(NA, dim = c(B, p_dim_sparse_tgfb1000 + 1))## parameters
+return_code_squared_error_bootstrap_tgfb172 <- array(NA, dim = c(B))## Optimisation errors
+
+
+for(b in 1:B){
+      
+  ## Resample the data
+  boot_indicies <- sample(1:n_obs_tgfb10000, n_obs_tgfb10000, replace = TRUE)
+
+  Hyvarinen_Bayesnorm_linearmodel_data_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y[boot_indicies], nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway[boot_indicies,], mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_tgfb172 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_tgfb172
+  , init = list(beta = MLE_tgfb10000_pathway$coefficients, sigma2 = (summary(MLE_tgfb10000_pathway)$sigma)**2)
+  , hessian = TRUE
+  )
+
+  return_code_squared_error_bootstrap_tgfb172[b] <- Hyvarinen_Bayesnorm_linearmodel_tgfb172$return_code
+  phi_star_squared_error_bootstrap_tgfb172[b,] <- Hyvarinen_Bayesnorm_linearmodel_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 1)]
+    
+  
+  if((b %% (B/10)) == 1){
+    cat("Bootstrap", b, "done", "\n")
+  }
+}
+
+optim_valid <- which(return_code_squared_error_bootstrap_tgfb172 == 0)
+    
+boostrap_means_squared_error_tgfb172 <- colMeans(phi_star_squared_error_bootstrap_tgfb172[optim_valid, ])
+boostrap_vars_squared_error_tgfb172 <- colVars(phi_star_squared_error_bootstrap_tgfb172[optim_valid, ])
+
+```
+
+#### Tukey's loss, nu, non-local prior
+
+Then for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_bootstrap_tgfb172, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+B <- 500
+
+phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172 <- array(NA, dim = c(B, p_dim_sparse_tgfb1000 + 2))## parameters
+return_code_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172 <- array(NA, dim = c(B))## Optimisation errors
+
+for(b in 1:B){
+      
+  ## Resample the data
+  boot_indicies <- sample(1:n_obs_tgfb10000, n_obs_tgfb10000, replace = TRUE)
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_tgfb172 <- list(n = n_obs_tgfb10000, p = p_dim_sparse_tgfb1000, y = as.matrix(tgfb10000_y[boot_indicies], nrow = n_obs_tgfb10000, ncol = 1), X = tgfb10000_X_pathway[boot_indicies,], mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_tgfb172 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_tgfb172
+  , init = list(beta = MLE_tgfb10000_pathway $coefficients, sigma2 = (summary(MLE_tgfb10000_pathway )$sigma)**2, nu = 1/3^2)
+  , hessian = TRUE
+# , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[b] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_tgfb172$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[b, ] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_tgfb172$par[1:(p_dim_sparse_tgfb1000 + 2)]
+    
+  if((b %% (B/10)) == 1){
+    cat("Bootstrap", b, "done", "\n")
+  }
+}
+
+optim_valid <- which(return_code_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172 == 0)
+    
+boostrap_means_Tukeys_nu_NLP_absapprox_tgfb172 <- c(colMeans(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[optim_valid, 1:(p_dim_sparse_tgfb1000 + 1)]), mean(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[optim_valid, (p_dim_sparse_tgfb1000 + 2)])))
+boostrap_vars_Tukeys_nu_NLP_absapprox_tgfb172 <- c(colVars(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[optim_valid, 1:(p_dim_sparse_tgfb1000 + 1)]), var(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_bootstrap_tgfb172[optim_valid, (p_dim_sparse_tgfb1000 + 2)])))
+
+```
+
+### Plots from the paper
+
+Producing the plots for Figures 4 and A.2 of the paper.
+
+```{r TGFB_Gaussian_Tukeys_Comparison, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.3, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+x_seq <- seq(-10, 10, length.out = 1000)
+
+tgfb172_density_squared_error_fun <- approxfun(density((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1])))
+tgfb172_max_density_squared_error_fun <- max(tgfb172_density_squared_error_fun((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1])))
+
+hist((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1]), breaks = 30, probability = TRUE, main = paste("TGF-$\\beta$ data, $\\tilde{\\mathcal{H}}_1(y_{1:262}) = $", round(hat_H_score_squared_error_tgfb172,2)), xlab = "$(y - X\\hat{\\beta})/\\hat{\\sigma}$")
+points(x_seq, dnorm(x_seq, 0, 1)*tgfb172_max_density_squared_error_fun/dnorm(0, 0, 1), lwd = 3, type = "l", lty = 1, col = "red")
+legend("topleft",c("Gaussian"), col = c("red"), lwd = rep(3, 2), lty = c(1), bty = "n", cex = 1.25)
+box()
+
+
+
+tgfb172_density_Tukeys_nu_NLP_absapprox_fun <- approxfun(density((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1])))
+tgfb172_max_density_Tukeys_nu_NLP_absapprox_fun <- max(tgfb172_density_Tukeys_nu_NLP_absapprox_fun((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1])))
+
+hist((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 1]), breaks = 50, probability = TRUE, main = paste("TGF-$\\beta$ data: $\\tilde{\\kappa} = $ ", round(1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2]),2), ", $\\tilde{\\mathcal{H}}_2(y_{1:262}) = $ ", round(hat_H_score_Tukeys_nu_NLP_absapprox_tgfb172,2), sep = ""), xlab = "$(y - X\\hat{\\beta})/\\hat{\\sigma}$", ylim = c(0, 0.5), ylab = "(Pseudo) Density")
+points(x_seq, dnorm(x_seq, 0, 1), lwd = 3, type = "l", lty = 2, col = "grey")
+points(x_seq, exp(log_score_tukey_varThresh(x_seq, 0, 1, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2]))) * tgfb172_max_density_Tukeys_nu_NLP_absapprox_fun/exp(log_score_tukey_varThresh(0, 0, 1, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_tgfb172[p_dim_sparse_tgfb1000 + 2]))), lwd = 3, type = "l", lty = 1, col = "dark green")
+legend("topleft",c("Tukey's Loss", "$\\mathcal{N}(0, 1)$"), col = c("dark green", "grey"), lwd = rep(3, 2), lty = c(1, 2), bty = "n", cex = 1.25)
+box()
+
+## Normal QQ-plots
+
+qqnorm((tgfb10000_y - tgfb10000_X_pathway%*%phi_star_squared_error_tgfb172[1:p_dim_sparse_tgfb1000]) / sqrt(phi_star_squared_error_tgfb172[p_dim_sparse_tgfb1000 + 1]))
+abline(a = 0, b = 1, lwd = 3, col = "grey", lty = 2)
+
+
+## Mean-squared error
+
+plot(0:(p_dim_sparse_tgfb1000 - 1), (phi_star_squared_error_tgfb172[1:(p_dim_sparse_tgfb1000)] - phi_star_Tukeys_nu_NLP_absapprox_tgfb172[1:(p_dim_sparse_tgfb1000)])^2, type = "b", lwd = 3, col = "black", xlab = "Parameter index", ylab = "Difference: Tukey's - Gaussian", main = "", ylim = c(0, 0.05))
+points(0:(p_dim_sparse_tgfb1000 - 1), (boostrap_vars_Tukeys_nu_NLP_absapprox_tgfb172[1:(p_dim_sparse_tgfb1000)] - boostrap_vars_squared_error_tgfb172[1:(p_dim_sparse_tgfb1000)]), col = "grey", lwd = 3, type = "b", lty = 2)
+#legend("topleft",c("Squared parameter difference", "Parameter variance difference", "(Tukey's loss minus Gaussian)"), col = c("black", "grey", ""), lwd = c(rep(3, 2), 0), lty = c(1, 2, 0), bty = "n", cex = 1.25)
+legend("topleft",c("Squared parameter difference", "Variance of Tukey's estimate minus", "variance of Gaussian estimate"), col = c("black", "grey", ""), lwd = c(rep(3, 2), 0), lty = c(1, 2, 0), bty = "n", cex = 1.25)
+
+```

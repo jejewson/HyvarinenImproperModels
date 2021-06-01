@@ -1,0 +1,376 @@
+---
+title: "Marginal kappa experiments"
+author: "Jack Jewson"
+date: "27 May 2021"
+output: html_document
+---
+
+Code to reproduce the marginal kappa experiments in Section 5.1 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+
+library(actuar)
+library(VGAM)
+library(matrixStats)
+library(bridgesampling)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(mvtnorm)
+library(lmf)
+library(RColorBrewer)
+
+```
+
+### Hessian Functions and Priors
+
+Loading functions to set the priors and evaluate the Laplace approximations of the $\mathcal{H}$-score.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("HScore_fns_grads_hess.R")
+source("priors.R")
+```
+
+### Prior Specification
+
+Specifying the prior hyperparameters.
+
+```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+mu_0 <- 0
+v_0 <- 5
+a_0 <- 2.01
+b_0 <- 0.5
+
+```
+
+### stan file compilations
+
+Loading and compiling .stan programs to obtain the MAP point estimates for the Laplace approximations
+
+
+```{r stan_files, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+setwd(paste(my.dir, "/stan", sep = ""))
+
+Hyvarinen_Bayesnorm_linearmodel_stan <- stan_model(file = "Hyvarinen_Bayesnorm_linearmodel.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel.stan")
+
+N_MCMC <- 1000
+```
+
+## Tukey's Losses/pseudo-probability for different kappa
+
+Plotting Tukey's loss and corresponding improper density. Used to produce Figure 1.
+
+```{r Tukeys_loss_function, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+kappa_thresh <- c(2, 3, 4)
+x_seq <- seq(-5, 5, length.out = 1000)
+
+light_offset <- 0
+greens <- rep("grey", length(kappa_thresh))
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, x_seq^2/2, type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma^2$", ylab = "$\\ell(y; \\theta, \\kappa_2)$", col = "black", ylim = c(0, 4))
+for(i in 1:length(kappa_thresh)){
+  points(x_seq, tukey_loss(x_seq, kappa_thresh[i]), type = "l", lwd = 3 , col = greens[i + light_offset], lty = i)
+}
+legend("top", c("$\\kappa_2 = \\infty$", "$\\kappa_2 = 4$", "$\\kappa_2 = 3$", "$\\kappa_2 = 2$"), col = c("black", rev(greens)[1:3]), lwd = rep(3, 4), lty = c(1, 3:1), bty = "n", cex = 1.25)
+
+```
+
+
+```{r Tukeys_pseudo_density, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+kappa_thresh <- c(2, 3, 4)
+x_seq <- seq(-5, 5, length.out = 1000)
+
+light_offset <- 0
+greens <- rep("grey", length(kappa_thresh))
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, dnorm(x_seq, 0, 1), type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma^2$", ylab = "$\\tilde{f}(y; \\theta, \\kappa_2)$", col = "black")
+for(i in 1:length(kappa_thresh)){
+  points(x_seq, exp(-tukey_loss(x_seq, kappa_thresh[i]))*dnorm(0, 0, 1)/exp(-tukey_loss(0, kappa_thresh[i])), type = "l", lwd = 3 , col = greens[i + light_offset], lty = i)
+}
+
+#col2rgb(greens[2 + light_offset])
+```
+
+## The $\mathcal{H}$-score marginally in Kappa {.tabset}
+
+### Data generation
+
+Generating the $\epsilon$-contamination data set.
+
+```{r data_sim, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE,results='hide'}
+library(metRology)
+
+n_obs <- 500
+
+p_dim <- 1
+X <- matrix(1, nrow = n_obs, ncol = p_dim)
+
+mu <- 0
+sigma2 <- 1
+
+set.seed(2)
+mu_c <- 5
+sigma2_c <- 3
+eps <- 0.1
+
+cont <- sample(c(0,1), n_obs, replace = TRUE, prob=c(1 - eps, eps))
+data_cont <- (1-cont)*rnorm(n_obs, mu*X, sqrt(sigma2)) + cont*rnorm(n_obs, mu_c, sqrt(sigma2_c))
+
+```
+
+### Gaussian model, Laplace Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_LaplaceApprox_cont_n100, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+Hyvarinen_Bayesnorm_linearmodel_data_cont_n500 <- list(n = n_obs, p = p_dim, y = as.matrix(data_cont, nrow = n_obs, ncol = 1), X = as.matrix(X, nrow = n_obs, ncol = 1), mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+Hyvarinen_Bayesnorm_linearmodel_cont_n500 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_cont_n500
+#, init = list(c1 = list(mu = 0, sigma2 = 1))
+, hessian = TRUE
+)
+
+phi_star_squared_error_cont_n500 <- Hyvarinen_Bayesnorm_linearmodel_cont_n500$par[1:(p_dim + 1)]
+    
+### evaluating P_star
+H_star_squared_error_cont_n500 <- sum(H_score_norm(x = data_cont, mu = X%*%phi_star_squared_error_cont_n500[1:p_dim], sigma2 = phi_star_squared_error_cont_n500[p_dim + 1], w = 1))
+mlog_pi0_star_squared_error_cont_n500 <- NIG_mlog_prior_regression(beta = phi_star_squared_error_cont_n500[1:p_dim], sigma2 = phi_star_squared_error_cont_n500[p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+log_P_star_squared_error_cont_n500 <- - H_star_squared_error_cont_n500 - mlog_pi0_star_squared_error_cont_n500
+
+### Hessians
+hessian_H_star_squared_error_cont_n500 <- apply(hess_H_score_norm_regression(y = data_cont, X = X, beta = phi_star_squared_error_cont_n500[1:p_dim], sigma2 = phi_star_squared_error_cont_n500[p_dim + 1]), c(1, 2), sum)
+hessian_mlog_pi0_star_squared_error_cont_n500 <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_cont_n500[1:p_dim], sigma2 = phi_star_squared_error_cont_n500[p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+A_star_squared_error_cont_n500 <- -(- hessian_mlog_pi0_star_squared_error_cont_n500 - hessian_H_star_squared_error_cont_n500)
+
+### Lapalce Approximation 
+hat_H_score_squared_error_cont_n500 <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_cont_n500, A = A_star_squared_error_cont_n500, p = p_dim + 1)
+  
+```
+
+### Tukey's loss, absapprox, nu-marginal, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model marginally in $kappa$.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_marginal_absapprox_LaplaceApprox_cont_n500, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+kappa_vect <- seq(1, 10, by = 0.5)
+nu_vect <- 1/kappa_vect^2
+
+N_c <- length(kappa_vect)
+
+phi_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1))## parameters
+return_code_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c))## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c))## Prior
+hessian_mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1, p_dim + 1))## Hessian Prior 
+
+H_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c))## Hscore
+log_P_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c))## P_star
+hessian_H_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1, p_dim + 1))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1, p_dim + 1))## Hessian
+hat_H_score_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c))## Estimate
+
+
+for(k in 1:N_c){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_data_cont_n500 <- list(n = n_obs, p = p_dim, y = as.matrix(data_cont, nrow = n_obs, ncol = 1), X = as.matrix(X, nrow = n_obs, ncol = 1), mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1, nu = nu_vect[k])
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_data_cont_n500
+  , init = list(beta = array(0, dim = 1), sigma2 = 1)
+  , hessian = TRUE
+# , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_marginal_absapprox_cont_n500[k] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500$return_code
+  phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500$par[1:(p_dim + 1)]
+  
+  ### evaluating P_star
+  mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500[k] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k,1:p_dim], sigma2 = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  H_star_Tukeys_nu_marginal_absapprox_cont_n500[k] <- sum(H_score_tukey_varThresh_absapprox(x = data_cont, mu = X%*%phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, 1:p_dim], sigma2 = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, p_dim + 1], c = 1/sqrt(nu_vect[k]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_marginal_absapprox_cont_n500[k] <- - H_star_Tukeys_nu_marginal_absapprox_cont_n500[k] - mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500[k]
+
+  ### Hessians
+  hessian_mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500[k, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, 1:p_dim], sigma2 = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  hessian_H_star_Tukeys_nu_marginal_absapprox_cont_n500[k,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = data_cont, X = X, beta =  phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, 1:p_dim], sigma2 = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k, p_dim + 1], nu =  nu_vect[k], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)[1:(p_dim + 1), 1:(p_dim + 1)]
+  
+  A_star_Tukeys_nu_marginal_absapprox_cont_n500[k,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_marginal_absapprox_cont_n500[k,,] - hessian_H_star_Tukeys_nu_marginal_absapprox_cont_n500[k,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_marginal_absapprox_cont_n500[k] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_marginal_absapprox_cont_n500[k], A = A_star_Tukeys_nu_marginal_absapprox_cont_n500[k,,], p = p_dim)
+  
+  cat("Parameter kappa = ", kappa_vect[k], "done, $\mathcal{H}$-score = ", hat_H_score_Tukeys_nu_marginal_absapprox_cont_n500[k],"\n")
+}
+
+```
+
+### Boostrap variances for the parameters
+
+Estimating parameter variances by bootstrap resampling the observed data.
+
+#### Tukey's loss, absapprox, nu-marginal, Bootstrapped parameter variances
+
+For the Tukey's loss improper model for various fixed $\kappa$
+
+```{r Hyvarinen_TukeysBayesnorm_nu_marginal_absapprox_LaplaceApprox_cont_n500_bootstrap, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+kappa_vect <- seq(1, 10, by = 0.5)
+nu_vect <- 1/kappa_vect^2
+
+N_c <- length(kappa_vect)
+
+set.seed(54)
+
+B <- 1000 ## number of bootstrap repeats
+
+phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap <- array(NA, dim = c(N_c, B, p_dim + 1))## parameters
+return_code_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap <- array(NA, dim = c(N_c, B))## Optimisation errors
+
+for(k in 1:N_c){
+  for(b in 1:B){
+      
+    ## Sample Indepednent data
+    cont_resamp <- sample(c(0,1), n_obs, replace = TRUE, prob = c(1 - eps, eps))
+    data_cont_resamp <- (1-cont_resamp)*rnorm(n_obs, mu, sqrt(sigma2)) + cont_resamp*rnorm(n_obs, mu_c, sqrt(sigma2_c))
+      
+    Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_data_cont_n500 <- list(n = n_obs, p = p_dim, y = as.matrix(data_cont_resamp, nrow = n_obs, ncol = 1), X = as.matrix(X, nrow = n_obs, ncol = 1), mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1, nu = nu_vect[k])
+    
+    Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_data_cont_n500
+    , init = list(beta = array(0, dim = 1), sigma2 = 1)
+    , hessian = TRUE
+#   , verbose = TRUE
+    )
+  
+    return_code_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, b] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500$return_code
+    phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, b, ] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_cFixed_linearmodel_cont_n500$par[1:(p_dim + 1)]
+    }
+
+    cat("Parameter kappa = ",kappa_vect[k],"done", "\n")
+}
+
+boostrap_means_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1))
+boostrap_vars_Tukeys_nu_marginal_absapprox_cont_n500 <- array(NA, dim = c(N_c, p_dim + 1))
+for(k in 1:N_c){
+    
+  optim_valid <- which(return_code_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k,] == 0)
+    
+  boostrap_means_Tukeys_nu_marginal_absapprox_cont_n500[k, ] <- c(mean(phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, optim_valid, 1]), mean(phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, optim_valid, 2]))
+  boostrap_vars_Tukeys_nu_marginal_absapprox_cont_n500[k, ] <- c(var(phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, optim_valid, 1]), var(phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k, optim_valid, 2]))
+
+}
+
+```
+
+### Plot for the paper
+
+Producing the plots for Figure 2 of the paper.
+
+```{r epsilon_contamination_marginal_plots, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+## Plotting Hyperparameter ##
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+k_optim <- 9
+
+## Plotting the data 
+cont_ind <- which(cont == 1)
+
+hist_data1 <- hist(data_cont[-cont_ind],breaks=seq(-5,17,by=0.2),plot=FALSE)
+hist_data2 <- hist(data_cont[cont_ind],breaks=seq(-5,17,by=0.2),plot=FALSE)
+plot(0, 0, type="n", ylab="Density",  main="", xlab="Observations",ylim=c(0,0.475),xlim=c(-3,9))
+hist_data1$counts <- hist_data1$counts/(n_obs/5)
+hist_data2$counts <- hist_data2$counts/(n_obs/5)
+plot(hist_data1,add=TRUE,col="grey")
+plot(hist_data2,add=TRUE,col="black")
+x_seq <- seq(-4, 10, length.out = 1000)
+points(x_seq, 0.9*dnorm(x_seq, mu, sqrt(sigma2)) + 0.1*dnorm(x_seq, mu_c, sqrt(sigma2_c)), col = "black", type = "l", lwd = 3, xlab = "$x$", ylab = "Density")
+points(x_seq, dnorm(x_seq, phi_star_squared_error_cont_n500[1], sqrt(phi_star_squared_error_cont_n500[2]))*(0.9*dnorm(0, 0, 1) + 0.1*dnorm(0, 5, 3))/dnorm(0, 0, sqrt(phi_star_squared_error_cont_n500[2])), type = "l", lwd = 3, lty = 2, col = "red")
+points(x_seq, exp(log_score_tukey_varThresh(x = x_seq, mu = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k_optim, 1], sigma2 = phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k_optim, 2], c = kappa_vect[k_optim]))*(0.9*dnorm(0, 0, 1) + 0.1*dnorm(0, 5, 3))/exp(log_score_tukey_varThresh(0, 0, phi_star_Tukeys_nu_marginal_absapprox_cont_n500[k_optim, 2], kappa_vect[k_optim])), lwd = 3, lty = 2, col = "green", type = "l")
+legend("topright", c("$(1-\\epsilon)\\mathcal{N}(0,1) + \\epsilon\\mathcal{N}(5,3^2)$", "Gaussian", "Tukey's-loss"), lty = c(2, 1, 1), lwd = rep(4,4), col=c("grey","dark grey","black"), bty="n", cex=1.15)
+box(which = "plot")
+
+```
+
+```{r Hyvarinen_TukeysBayesnorm_nu_marginal_absapprox_LaplaceApprox_cont_n500_bootstrap_diag_tikz, include=TRUE,echo=TRUE, eval = TRUE, cache=FALSE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(kappa_vect, phi_star_Tukeys_nu_marginal_absapprox_cont_n500[, 1], type = "b", lwd = 3
+      , xlab = "$\\kappa_2$", ylab = "$\\mu$"
+      , ylim = c(-0.5, 1), col = "dark green")
+abline(h = phi_star_squared_error_cont_n500[1], col = "red", lwd = 3)
+abline(h = 0, col = "grey", lwd = 3, lty = 2)
+points(kappa_vect, phi_star_Tukeys_nu_marginal_absapprox_cont_n500[, 1] +  3*sqrt(boostrap_vars_Tukeys_nu_marginal_absapprox_cont_n500[, 1]), type = "b", lwd = 3, lty = 2, col = "green")
+points(kappa_vect, phi_star_Tukeys_nu_marginal_absapprox_cont_n500[, 1] -  3*sqrt(boostrap_vars_Tukeys_nu_marginal_absapprox_cont_n500[, 1]), type = "b", lwd = 3, lty = 2, col = "green")
+abline(v = kappa_vect[9], lwd = 3, col = "grey")
+
+## MSE
+plot(kappa_vect, boostrap_vars_Tukeys_nu_marginal_absapprox_cont_n500[, 1] + (phi_star_Tukeys_nu_marginal_absapprox_cont_n500[, 1] - 0)^2, type = "b", lwd = 3
+#     , xlab = expression(kappa[2]), ylab = expression(mu)
+      , xlab = "$\\kappa_2$", ylab = "MSE - $\\mu$"
+      , ylim = c(0, 0.05), col = "dark green")
+
+## boxplot
+## remove NAs
+phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap_boxplot <- array(NA, dim = c(N_c, B))
+phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap_boxplot <- phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[,,1]
+for(k in 1:N_c){
+  phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap_boxplot[k, which(return_code_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap[k,] != 0)] <- NA   
+}
+
+# 0.5 is 420 - put the $\mathcal{H}$-score axis on the boxplot
+#-0.5 is 40
+boxplot(t(phi_star_Tukeys_nu_marginal_absapprox_cont_n500_bootstrap_boxplot), ylim = c(-0.5, 0.5), names = FALSE, axes = FALSE, ylab = "", xlab = "", col = "grey"
+)
+axis(side = 1, at = c(3, 7, 11, 15, 19), labels = c(2, 4, 6, 8, 10))
+mtext("$\\kappa_2$", side = 1, line = 2, col = "black", cex = 1.25)
+axis(side = 2, at = c(-0.5 + 1*(100 - 40)/380, -0.5 + 1*(200 - 40)/380, -0.5 + 1*(300 - 40)/380, -0.5 + 1*(400 - 40)/380), labels = c(100, 200, 300, 400))
+mtext("$\\tilde{\\mathcal{H}}$-score", side = 2, line = 2, col = "black", cex = 1.25)
+axis(side = 4, at = c(-0.5, -0.25, 0, 0.25, 0.5), col = "grey", col.ticks = "grey", col.axis = "grey")
+mtext("$\\hat{\\mu}$", side = 4, line = 2, col = "grey", cex = 1.25)
+abline(h = 0, lwd = 3, lty = 1, col = "grey")
+lines(1:19, -0.5 + 1*(hat_H_score_Tukeys_nu_marginal_absapprox_cont_n500 - 40)/380, type = "b", lwd = 3, col = "black")
+box()
+```
+
+

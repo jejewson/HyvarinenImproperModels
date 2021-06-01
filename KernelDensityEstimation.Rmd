@@ -1,0 +1,856 @@
+---
+title: "Kernel Density Estimation"
+author: "Jack Jewson"
+date: "27 May 2021"
+output: html_document
+---
+
+Code to reproduce the kernel density estimation experiments in Section 6 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+library(matrixStats)
+library(kedd)
+library(nor1mix)
+library(dirichletprocess)
+library(rstan)
+rstan_options(auto_write = TRUE)
+```
+
+### Functions
+
+Loading functions to evaluate kernel density estimates.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("KDE_fns.R")
+```
+
+### Prior Specification
+
+Specifying the prior hyperparameters.
+
+```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+a_0 <- 1 #2
+b_0 <- 1 #0.5# 2 ## want very little mass at 0
+#w <- 1
+N_MCMC <- 5000
+
+N_mcmc <- 1000
+
+```
+
+### stan file compilations
+
+Loading and compiling .stan programs to obtain the MAP point estimates.
+
+```{r stan_files, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+setwd(paste(my.dir, "/stan", sep = ""))
+
+Hyvarinen_GaussianKernelDensityEstimation_stan <- stan_model(file = "Hyvarinen_GaussianKernelDensityEstimation.stan")
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan <- stan_model(file = "Hyvarinen_GaussianKernelDensityEstimation_w_reparam.stan")
+```
+
+## Gaussian Mixture Datasets
+
+Simulating Gaussian mixture data sets according to the specifications of Marron and Wand (1992).
+
+```{r kedd_package_datasets, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, dev = "tikz"}
+set.seed(47)
+
+n_obs <- 1000
+
+## Claw density
+claw_n <- rnorMix(n = n_obs, MW.nm10)
+claw_n_std <- (claw_n - mean(claw_n))
+claw_n_std <- claw_n_std / sd(claw_n)
+
+## bimodal density
+bimodal_n <- rnorMix(n = n_obs, MW.nm7)
+bimodal_n_std <- (bimodal_n - mean(bimodal_n))
+bimodal_n_std <- bimodal_n_std / sd(bimodal_n)
+
+## Trimodal density
+trimodal_n <- rnorMix(n = n_obs, MW.nm9)
+trimodal_n_std <- (trimodal_n - mean(trimodal_n))
+trimodal_n_std <- trimodal_n_std / sd(trimodal_n)
+
+## skewed density 
+skewed_n <- rnorMix(n = n_obs, MW.nm3)
+skewed_n_std <- (skewed_n - mean(skewed_n))
+skewed_n_std <- skewed_n_std / sd(skewed_n)
+
+## asymetric density 
+asymetric_n <- rnorMix(n = n_obs, MW.nm8)
+asymetric_n_std <- (asymetric_n - mean(asymetric_n))
+asymetric_n_std <- asymetric_n_std / sd(asymetric_n)
+
+## Kurtotic density
+kurtotic_n <- rnorMix(n = n_obs, MW.nm4)
+kurtotic_n_std <- (kurtotic_n - mean(kurtotic_n))
+kurtotic_n_std <- kurtotic_n_std / sd(kurtotic_n)
+```
+
+## claw data {.tabset}
+
+The *Claw* data set.
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_claw, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_claw_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_claw
+, init = list("sigma2" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_claw <- f_KDE_Gaussian_vect(x_seq, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_claw_optim$par[1], w =  1)
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_claw_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_claw, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_claw
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_claw <- f_KDE_Gaussian_vect(x_seq, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])}, lower = -Inf, upper = Inf)
+
+```
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_claw, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_claw <- DirichletProcessGaussian(claw_n_std)
+dp_claw <- Fit(dp_claw, N_mcmc, progressBar = FALSE)
+
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_claw_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+dgp_density <- function(x){sd(claw_n)*dnorm_mixture(x = sd(claw_n)*x + mean(claw_n), mus = c(0, seq(-1, 1, by = 0.5)), sigma2s = c(1, rep(0.01, 5)), ws = c(0.5, rep(0.1, 5)))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(claw_n), s = sd(claw_n), mus = c(0, seq(-1, 1, by = 0.5)), sigma2s = c(1, rep(0.01, 5)), ws = c(0.5, rep(0.1, 5)))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_claw_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = density(claw_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_claw$clusterParameters[[1]]), sigma2s = c(dp_claw$clusterParameters[[2]])^2, ws = dp_claw$weights)}
+
+FisherDivergence_claw_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_hyv_KDE
+
+FisherDivergence_claw_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_hyv_KDE_w
+
+FisherDivergence_claw_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_KDE
+
+FisherDivergence_claw_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_claw_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(claw_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.65), main = "claw", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+#plot
+points(x_seq, f_KDE_Gaussian_eval_claw/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_claw/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(claw_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_claw$weights, means = dp_claw$clusterParameters[[1]], sds = dp_claw$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+points(x_seq, sd(claw_n)*dnorm_mixture(x = sd(claw_n)*x_seq + mean(claw_n), mus = c(0, seq(-1, 1, by = 0.5)), sigma2s = c(1, rep(0.01, 5)), ws = c(0.5, rep(0.1, 5))), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+
+```
+
+## bimodal data {.tabset}
+
+The *Bimodal* data set
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_bimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_bimodal
+, init = list("sigma2" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_bimodal <- f_KDE_Gaussian_vect(x_seq, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim$par[1], w =  1)
+
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_bimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_bimodal
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_bimodal <- f_KDE_Gaussian_vect(x_seq, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])}, lower = -Inf, upper = Inf)
+
+```
+
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_bimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_bimodal <- DirichletProcessGaussian(bimodal_n_std)
+dp_bimodal <- Fit(dp_bimodal, N_mcmc, progressBar = FALSE)
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_bimodal_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+dgp_density <- function(x){sd(bimodal_n)*dnorm_mixture(x = sd(bimodal_n)*x + mean(bimodal_n), mus = c(-1.5, 1.5), sigma2s = c(1/4, 1/4), ws = c(0.5, 0.5))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(bimodal_n), s = sd(bimodal_n), mus = c(-1.5, 1.5), sigma2s = c(1/4, 1/4), ws = c(0.5, 0.5))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = density(bimodal_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_bimodal$clusterParameters[[1]]), sigma2s = c(dp_bimodal$clusterParameters[[2]])^2, ws = dp_bimodal$weights)}
+
+FisherDivergence_bimodal_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_hyv_KDE
+
+FisherDivergence_bimodal_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_hyv_KDE_w
+
+FisherDivergence_bimodal_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_KDE
+
+FisherDivergence_bimodal_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_bimodal_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(bimodal_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.75), main = "bimodal", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+points(x_seq, f_KDE_Gaussian_eval_bimodal/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_bimodal/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(bimodal_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_bimodal$weights, means = dp_bimodal$clusterParameters[[1]], sds = dp_bimodal$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+points(x_seq, sd(bimodal_n)*dnorm_mixture(x = sd(bimodal_n)*x_seq + mean(bimodal_n), mus = c(-1.5, 1.5), sigma2s = c(1/4, 1/4), ws = c(0.5, 0.5)), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+
+```
+
+## trimodal data {.tabset}
+
+The *Trimodal* data set.
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_trimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)#1/(10*sqrt(5*n_obs)))
+
+Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_trimodal
+, init = list("sigma2" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_trimodal <- f_KDE_Gaussian_vect(x_seq, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim$par[1], w =  1)
+
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_trimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_trimodal
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_trimodal <- f_KDE_Gaussian_vect(x_seq, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])}, lower = -Inf, upper = Inf)
+```
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_trimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_trimodal <- DirichletProcessGaussian(trimodal_n_std)
+dp_trimodal <- Fit(dp_trimodal, N_mcmc, progressBar = FALSE)
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_trimodal_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+dgp_density <- function(x){sd(trimodal_n)*dnorm_mixture(x = sd(trimodal_n)*x + mean(trimodal_n), mus = c(-1.2, 1.2, 0), sigma2s = c(9/25, 9/25, 1/16), ws = c(0.45, 0.45, 0.1))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(trimodal_n), s = sd(trimodal_n), mus = c(-1.2, 1.2, 0), sigma2s = c(9/25, 9/25, 1/16), ws = c(0.45, 0.45, 0.1))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = density(trimodal_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_trimodal$clusterParameters[[1]]), sigma2s = c(dp_trimodal$clusterParameters[[2]])^2, ws = dp_trimodal$weights)}
+
+FisherDivergence_trimodal_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_hyv_KDE
+
+FisherDivergence_trimodal_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_hyv_KDE_w
+
+FisherDivergence_trimodal_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_KDE
+
+FisherDivergence_trimodal_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_trimodal_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(trimodal_n_std, probability = TRUE, breaks = 50, main = "trimodal", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+points(x_seq, f_KDE_Gaussian_eval_trimodal/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_trimodal/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(trimodal_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_trimodal$weights, means = dp_trimodal$clusterParameters[[1]], sds = dp_trimodal$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+points(x_seq, sd(trimodal_n)*dnorm_mixture(x = sd(trimodal_n)*x_seq + mean(trimodal_n), mus = c(-1.2, 1.2, 0), sigma2s = c(9/25, 9/25, 1/16), ws = c(0.45, 0.45, 0.1)), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+```
+
+
+## skewed data {.tabset}
+
+The *Skewed* data set.
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_skewed, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_skewed_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_skewed
+, init = list("sigma2" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_skewed <- f_KDE_Gaussian_vect(x_seq, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_skewed_optim$par[1], w =  1)
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_skewed_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_skewed, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_skewed
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_skewed <- f_KDE_Gaussian_vect(x_seq, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])}, lower = -Inf, upper = Inf)
+
+```
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_skewed, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_skewed <- DirichletProcessGaussian(skewed_n_std)
+dp_skewed <- Fit(dp_skewed, N_mcmc, progressBar = FALSE)
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_skewed_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+sig <- ((2/3)^((0:7)))
+
+dgp_density <- function(x){sd(skewed_n)*dnorm_mixture(x = sd(skewed_n)*x + mean(skewed_n), mus = 3 * (sig - 1), sigma2s = sig^2, ws = rep(1/8, 8))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(skewed_n), s = sd(skewed_n), mus = 3 * (sig - 1), sigma2s = sig^2, ws = rep(1/8, 8))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_skewed_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = density(skewed_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_skewed$clusterParameters[[1]]), sigma2s = c(dp_skewed$clusterParameters[[2]])^2, ws = dp_skewed$weights)}
+
+FisherDivergence_skewed_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_hyv_KDE
+
+FisherDivergence_skewed_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_hyv_KDE_w
+
+FisherDivergence_skewed_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_KDE
+
+FisherDivergence_skewed_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_skewed_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(skewed_n_std, probability = TRUE, breaks = 50, ylim = c(0, 1.85), main = "skewed", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+points(x_seq, f_KDE_Gaussian_eval_skewed/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_skewed/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(skewed_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_skewed$weights, means = dp_skewed$clusterParameters[[1]], sds = dp_skewed$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+sig <- ((2/3)^((0:7)))
+points(x_seq, sd(skewed_n)*dnorm_mixture(x = sd(skewed_n)*x_seq + mean(skewed_n), mus = 3 * (sig - 1), sigma2s = sig^2, ws = rep(1/8, 8)), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+legend("topright",c("$g(y)$", "DPMM", "KDE (Silverman)", "KDE ($\\mathcal{H}$-posterior)", "KDE - $w$ ($\\mathcal{H}$-posterior)"), col = c("grey", "red", "orange", "blue", "purple"), lwd = rep(3, 5), lty = c(2, rep(1, 4)), bty = "n", cex = 1.25)
+
+```
+
+
+## asymetric data {.tabset}
+
+The *Asymetric* data set.
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_asymetric, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_asymetric <- list(n = n_obs, y = matrix(asymetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_asymetric_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_asymetric
+ , init = list("sigma2" = 0.05)                                                                               
+)
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_asymetric <- f_KDE_Gaussian_vect(x_seq, asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_asymetric_optim$par[1], w =  1)
+
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_asymetric_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_asymetric, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_asymetric <- list(n = n_obs, y = matrix(asymetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_asymetric
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_asymetric <- f_KDE_Gaussian_vect(x_seq, asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[2])}, lower = -Inf, upper = Inf)
+
+```
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_asymetric, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_asymetric <- DirichletProcessGaussian(asymetric_n_std)
+dp_asymetric <- Fit(dp_asymetric, N_mcmc, progressBar = FALSE)
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_asymetric_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+dgp_density <- function(x){sd(asymetric_n)*dnorm_mixture(x = sd(asymetric_n)*x + mean(asymetric_n), mus = c(0, 1.5), sigma2s = c(1, 1/9), ws = c(0.75, 0.25))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(asymetric_n), s = sd(asymetric_n), mus = c(0, 1.5), sigma2s = c(1, 1/9), ws = c(0.75, 0.25))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_asymetric_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymetric_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymetric_n_std, sigma2 = density(asymetric_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_asymetric$clusterParameters[[1]]), sigma2s = c(dp_asymetric$clusterParameters[[2]])^2, ws = dp_asymetric$weights)}
+
+
+FisherDivergence_asymetric_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(asymetric_n_std), upper = max(asymetric_n_std))
+FisherDivergence_asymetric_hyv_KDE
+
+FisherDivergence_asymetric_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(asymetric_n_std), upper = max(asymetric_n_std))
+FisherDivergence_asymetric_hyv_KDE_w
+
+FisherDivergence_asymetric_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(asymetric_n_std), upper = max(asymetric_n_std))
+FisherDivergence_asymetric_KDE
+
+FisherDivergence_asymetric_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(asymetric_n_std), upper = max(asymetric_n_std))
+FisherDivergence_asymetric_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_asymetric_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(asymetric_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.65), main = "asymetric", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+points(x_seq, f_KDE_Gaussian_eval_asymetric/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_asymetric/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(asymetric_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_asymetric$weights, means = dp_asymetric$clusterParameters[[1]], sds = dp_asymetric$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+points(x_seq, sd(asymetric_n)*dnorm_mixture(x = sd(asymetric_n)*x_seq + mean(asymetric_n), mus = c(0, 1.5), sigma2s = c(1, 1/9), ws = c(0.75, 0.25)), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+legend("topleft",c("KDE ($\\mathcal{H}$-posterior)", "KDE - $w$ ($\\mathcal{H}$-posterior)", "KDE (Silverman)", "DPMM" , "$g(y)$"), col = c("blue", "purple", "orange", "red", "grey" ), lwd = rep(3, 5), lty = c(rep(1, 4), 2), bty = "n", cex = 1.25)
+
+```
+
+## kurtotic data {.tabset}
+
+The *Kurtotic* data set.
+
+### KDE - Hyvarinen score optimisation (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model with $w = 1$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_kurtotic, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_kurtotic
+, init = list("sigma2" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_Gaussian_eval_kurtotic <- f_KDE_Gaussian_vect(x_seq, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim$par[1], w =  1)
+
+
+KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim$par[1], w = 1)}, lower = -Inf, upper = Inf)
+
+```
+
+### KDE - Hyvarinen score optimisation - w (stan)
+
+MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
+
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_kurtotic, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+
+Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_kurtotic
+, init = list("sigma2" = 0.1, "phi" = 0.1)
+)
+
+x_seq <- seq(-5, 5, length.out = 1000)
+f_KDE_w_reparam_Gaussian_eval_kurtotic <- f_KDE_Gaussian_vect(x_seq, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])
+
+
+KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])}, lower = -Inf, upper = Inf)
+
+```
+
+### R's DPpackage
+
+The Dirichlet process mixture model estimated using the *dirichletprocess* package.
+
+```{r DPmixture_kurtotic, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+dp_kurtotic <- DirichletProcessGaussian(kurtotic_n_std)
+dp_kurtotic <- Fit(dp_kurtotic, N_mcmc, progressBar = FALSE)
+
+```
+
+### Fisher's Divergence Estimation
+
+Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
+
+```{r data_kurtotic_comparison_FishersDivergence, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE}
+
+dgp_density <- function(x){sd(kurtotic_n)*dnorm_mixture(x = sd(kurtotic_n)*x + mean(kurtotic_n), mus = c(0, 0), sigma2s = c(1, 0.01), ws = c(2/3, 1/3))}
+grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(kurtotic_n), s = sd(kurtotic_n), mus = c(0, 0), sigma2s = c(1, 0.01), ws = c(2/3, 1/3))}
+
+grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim$par, w = 1)}
+grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])}
+grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = density(kurtotic_n_std)$bw^2, w = 1)}
+grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_kurtotic$clusterParameters[[1]]), sigma2s = c(dp_kurtotic$clusterParameters[[2]])^2, ws = dp_kurtotic$weights)}
+
+FisherDivergence_kurtotic_hyv_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_hyv_KDE
+
+FisherDivergence_kurtotic_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_hyv_KDE_w
+
+FisherDivergence_kurtotic_KDE <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_KDE
+
+FisherDivergence_kurtotic_DPMM <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_DPMM, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_DPMM
+
+```
+
+### Histogram and Density Plots
+
+Producing the plots for Figures 5 and A.3 of the paper.
+
+```{r data_kurtotic_comparison_tikz, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5} 
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+hist(kurtotic_n_std, probability = TRUE, breaks = 50, ylim = c(0, 1.3), xlim = c(-3, 3), main = "kurtotic", xlab = "$x$")
+x_seq <- seq(-5, 5, length.out = 1000)
+points(x_seq, f_KDE_Gaussian_eval_kurtotic/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
+points(x_seq, f_KDE_w_reparam_Gaussian_eval_kurtotic/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+lines(density(kurtotic_n_std), col = "orange", lwd = 3)
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_kurtotic$weights, means = dp_kurtotic$clusterParameters[[1]], sds = dp_kurtotic$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
+points(x_seq, sd(kurtotic_n)*dnorm_mixture(x = sd(kurtotic_n)*x_seq + mean(kurtotic_n), mus = c(0, 0), sigma2s = c(1, 0.01), ws = c(2/3, 1/3)), lwd = 3, col = "grey", lty = 2, type = "l")
+box()
+
+```
+
+
+## Comparison of all 
+
++ xtabe gives us latex 
++ kable put the table in Rmarkdown
+
+```{r data_comparison, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5, dev = "tikz"} 
+
+colNames <- c("KDE Silverman1986", "DPMM", "Hyvarinen KDE", "Hyvarinen KDE - w")
+rowNames <- c("bimodal", "claw", "trimodal", "skewed", "asymetric", "kurtotic")
+
+
+FisherDivergences_bimodal <- c(FisherDivergence_bimodal_KDE$value, FisherDivergence_bimodal_DPMM$value, FisherDivergence_bimodal_hyv_KDE$value, FisherDivergence_bimodal_hyv_KDE_w$value)
+
+FisherDivergences_claw <- c(FisherDivergence_claw_KDE$value, FisherDivergence_claw_DPMM$value, FisherDivergence_claw_hyv_KDE$value, FisherDivergence_claw_hyv_KDE_w$value)
+
+FisherDivergences_trimodal <- c(FisherDivergence_trimodal_KDE$value, FisherDivergence_trimodal_DPMM$value, FisherDivergence_trimodal_hyv_KDE$value, FisherDivergence_trimodal_hyv_KDE_w$value)
+
+FisherDivergences_skewed <- c(FisherDivergence_skewed_KDE$value, FisherDivergence_skewed_DPMM$value, FisherDivergence_skewed_hyv_KDE$value, FisherDivergence_skewed_hyv_KDE_w$value)
+
+FisherDivergences_asymetric <- c(FisherDivergence_asymetric_KDE$value, FisherDivergence_asymetric_DPMM$value, FisherDivergence_asymetric_hyv_KDE$value, FisherDivergence_asymetric_hyv_KDE_w$value)
+
+FisherDivergences_kurtotic <- c(FisherDivergence_kurtotic_KDE$value, FisherDivergence_kurtotic_DPMM$value, FisherDivergence_kurtotic_hyv_KDE$value, FisherDivergence_kurtotic_hyv_KDE_w$value)
+  
+  
+FisherDivergences <- rbind(FisherDivergences_bimodal, FisherDivergences_claw, FisherDivergences_trimodal, FisherDivergences_skewed, FisherDivergences_asymetric, FisherDivergences_kurtotic)
+
+colnames(FisherDivergences) <- colNames
+rownames(FisherDivergences) <- rowNames
+
+library(knitr)
+kable(FisherDivergences)
+
+library(xtable)
+
+
+xtable(FisherDivergences)
+
+```
+

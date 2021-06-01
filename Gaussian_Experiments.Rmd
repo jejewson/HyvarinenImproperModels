@@ -1,0 +1,1450 @@
+---
+title: "Gaussian Experiments"
+author: "Jack Jewson"
+date: "27 May 2021"
+output: html_document
+---
+
+Code to reproduce the Gaussian experiments in Section 5.2 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+
+library(actuar)
+library(VGAM)
+library(matrixStats)
+library(bridgesampling)
+library(rstan)
+rstan_options(auto_write = TRUE)
+library(mvtnorm)
+library(lmf)
+
+```
+
+### Hessian Functions and Priors
+
+Loading functions to set the priors and evaluate the Laplace approximations of the $\mathcal{H}$-score.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("HScore_fns_grads_hess.R")
+source("priors.R")
+```
+
+### Prior Specification
+
+Specifying the prior hyperparameters.
+
+```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+mu_0 <- 0
+v_0 <- 5
+a_0 <- 2.01
+b_0 <- 0.5
+
+nu_NLP_a_0 <- a_0_nu_NLP_select
+nu_NLP_b_0 <- b_0_nu_NLP_select
+
+## The half-Gaussian prior 
+nu_a_0 <- 0
+nu_b_0 <- 1 
+
+
+```
+
+### Plotting the Local and Non-Local Priors
+
+Plotting the local and non-local priors on $\nu_2$ and the corresponding priors on $\kappa_2$. Used to produce Figure A.1.
+
+```{r pres_Tukeys_Loss_NLP_LP_nu, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE, fig.height = 3, fig.width = 5} 
+
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+#### nu ####
+
+nu_seq <- seq(0, 2, length.out = 1000)
+plot(nu_seq, dinvgamma(nu_seq, shape = a_0_nu_NLP_select, scale = b_0_nu_NLP_select), type = "l", lwd = 3, ylab = "Density"
+     , xlab = "$\\nu_2$"
+     )
+points(nu_seq, 2*dnorm(nu_seq, 0, 1), lwd = 3, col = "grey", lty = 2, type = "l")
+abline(v = 1/target_lower^2, lwd = 3, lty = 2, col = "red")
+abline(v = 1/target_upper^2, lwd = 3, lty = 2, col = "red")
+legend("topright", c("Local Prior", "Non-Local Prior"), lwd = rep(3, 2), col = c("grey", "black"), lty = c(2, 1) , bty = "n", cex = 1.25)
+
+#### kappa ####
+
+kappa_seq <- seq(0, 7, length.out = 1000)
+plot(kappa_seq, dkappa_pior_nu_IG(kappa_seq, a_0 = a_0_nu_NLP_select, b_0 = b_0_nu_NLP_select), type = "l", lwd = 3, ylab = "Density"
+     , xlab = "$\\kappa$"
+     )
+points(kappa_seq, half_Gauaaian_nu_kappa(kappa_seq, m_0 = 0, s2_0 = 1), lwd = 3, col = "grey", lty = 2, type = "l")
+abline(v = target_lower, lwd = 3, lty = 2, col = "red")
+abline(v = target_upper, lwd = 3, lty = 2, col = "red")
+legend("topright", c("Local Prior", "Non-Local Prior"), lwd = rep(3, 2), col = c("grey", "black"), lty = c(2, 1) , bty = "n", cex = 1.25)
+
+```
+
+### stan file compilations
+
+Loading and compiling .stan programs to obtain the MAP point estimates for the Laplace approximations
+
+```{r stan_files, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+setwd(paste(my.dir, "/stan", sep = ""))
+
+Hyvarinen_Bayesnorm_linearmodel_stan <- stan_model(file = "Hyvarinen_Bayesnorm_linearmodel.stan")
+Hyvarinen_Bayesnorm_linearmodel_noPrior_stan <- stan_model(file="Hyvarinen_Bayesnorm_linearmodel_noPrior.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_stan <- stan_model(file="Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel.stan")
+
+Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan <- stan_model(file = "Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior.stan")
+
+N_MCMC <- 1000
+```
+
+## Gaussian errors - n = 100 {.tabset}
+
+### Data generation
+
+Generating the Gaussian regression data set
+
+```{r true_experiments_data_sim_n100, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+set.seed(25)
+
+N_rep <- 100
+n_obs <- 100
+p_dim <- 6
+
+theta_gen <- c(0,0.5,1,1.5,0,0)
+
+mu <- 0
+sigma2 <- 1
+
+true_n100_data <- list()
+
+predictor_covariance <- matrix(0.5,nrow=p_dim-1,ncol=p_dim-1) + diag(0.5,p_dim-1)
+
+library(mvtnorm)
+library(rmutil)
+for(i in 1:N_rep){
+  data_X <- cbind(1,rmvnorm(n_obs, mean = rep(0,p_dim-1), sigma = predictor_covariance))
+  data_y <- theta_gen %*% t(data_X) + rnorm(n_obs, mu, sqrt(sigma2))
+  true_n100_data[[i]] <- list("data_X" = data_X, "data_y" = drop(data_y))
+}
+
+
+```
+
+### Gaussian model, Laplace Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_true_n100, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_true_n100 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_true_n100 <- rep(NA, N_rep)## Optimisation errors
+
+H_star_squared_error_true_n100 <- rep(NA, N_rep)## Hscore
+mlog_pi0_star_squared_error_true_n100 <- rep(NA, N_rep)## Prior
+log_P_star_squared_error_true_n100 <- rep(NA, N_rep)## P_star
+hessian_H_star_squared_error_true_n100 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian $\mathcal{H}$-score
+hessian_mlog_pi0_star_squared_error_true_n100 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian Prior 
+A_star_squared_error_true_n100 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian
+hat_H_score_squared_error_true_n100 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_data_true_n100 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_true_n100 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_true_n100
+#  , init = list(c1 = list(mu = 0, sigma2 = 1))
+, hessian = TRUE
+  )
+
+  return_code_squared_error_true_n100[j] <- Hyvarinen_Bayesnorm_linearmodel_true_n100$return_code
+  phi_star_squared_error_true_n100[j,] <- Hyvarinen_Bayesnorm_linearmodel_true_n100$par[1:(p_dim + 1)]
+  
+  ### evaluating P_star
+  H_star_squared_error_true_n100[j] <- sum(H_score_norm(x = true_n100_data[[j]]$data_y, mu = true_n100_data[[j]]$data_X%*%phi_star_squared_error_true_n100[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100[j,p_dim + 1], w = 1))
+  mlog_pi0_star_squared_error_true_n100[j] <- NIG_mlog_prior_regression(beta = phi_star_squared_error_true_n100[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  log_P_star_squared_error_true_n100[j] <- - H_star_squared_error_true_n100[j] - mlog_pi0_star_squared_error_true_n100[j]
+  ### Hessians
+  hessian_H_star_squared_error_true_n100[j,,] <- apply(hess_H_score_norm_regression(y = true_n100_data[[j]]$data_y, X = true_n100_data[[j]]$data_X, beta = phi_star_squared_error_true_n100[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100[j,p_dim + 1]), c(1, 2), sum)
+  hessian_mlog_pi0_star_squared_error_true_n100[j,,] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_true_n100[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  A_star_squared_error_true_n100[j,,] <- -(- hessian_mlog_pi0_star_squared_error_true_n100[j,,] - hessian_H_star_squared_error_true_n100[j,,])
+  ### Lapalce Approximation 
+  hat_H_score_squared_error_true_n100[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_true_n100[j], A = A_star_squared_error_true_n100[j,,], p = p_dim + 1)
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_true_n100, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_noPrior_true_n100 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_noPrior_true_n100 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_squared_error_true_n100 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n100 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n100
+  , init = list(beta = theta_gen, sigma2 = 1)
+#, hessian = TRUE
+  )
+
+  return_code_squared_error_noPrior_true_n100[j] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100$return_code
+  phi_star_squared_error_noPrior_true_n100[j,] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100$par[1:(p_dim + 1)]
+    
+  SMIC_H_score_squared_error_true_n100[j] <- SMIC_H_score_norm_regression(y = true_n100_data[[j]]$data_y, X = true_n100_data[[j]]$data_X, beta = phi_star_squared_error_noPrior_true_n100[j,1:p_dim], sigma2 = phi_star_squared_error_noPrior_true_n100[j,p_dim + 1])
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_LP_linearmodel_absapprox_LaplaceApprox_true_n100, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+phi_star_Tukeys_nu_LP_absapprox_true_n100 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_LP_absapprox_true_n100 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_LP_absapprox_true_n100 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_LP_absapprox_true_n100 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_LP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_LP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_LP_absapprox_true_n100 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n100 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n100
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_LP_absapprox_true_n100[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100$return_code
+  phi_star_Tukeys_nu_LP_absapprox_true_n100[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100$par[1:(p_dim + 2)]
+    
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dnorm(phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 2], nu_a_0, nu_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_LP_absapprox_true_n100[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n100_data[[j]]$data_y, mu = true_n100_data[[j]]$data_X%*%phi_star_Tukeys_nu_LP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_LP_absapprox_true_n100[j] <- - H_star_Tukeys_nu_LP_absapprox_true_n100[j] - mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j]
+  
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j, (p_dim + 2), (p_dim + 2)] <- 1/nu_b_0^2
+
+  hessian_H_star_Tukeys_nu_LP_absapprox_true_n100[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n100_data[[j]]$data_y, X = true_n100_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_LP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 1], nu =  phi_star_Tukeys_nu_LP_absapprox_true_n100[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_LP_absapprox_true_n100[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100[j,,] - hessian_H_star_Tukeys_nu_LP_absapprox_true_n100[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_LP_absapprox_true_n100[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_LP_absapprox_true_n100[j], A = A_star_Tukeys_nu_LP_absapprox_true_n100[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, non-local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_true_n100, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_NLP_absapprox_true_n100 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_NLP_absapprox_true_n100 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_NLP_absapprox_true_n100 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_NLP_absapprox_true_n100 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_NLP_absapprox_true_n100 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_NLP_absapprox_true_n100 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n100 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n100
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_true_n100[j] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100$par[1:(p_dim + 2)]
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_NLP_absapprox_true_n100[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n100_data[[j]]$data_y, mu = true_n100_data[[j]]$data_X%*%phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_NLP_absapprox_true_n100[j] <- - H_star_Tukeys_nu_NLP_absapprox_true_n100[j] - mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j]
+
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j, (p_dim + 2), (p_dim + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+  hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n100_data[[j]]$data_y, X = true_n100_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_true_n100[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_NLP_absapprox_true_n100[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100[j,,] - hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_NLP_absapprox_true_n100[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_true_n100[j], A = A_star_Tukeys_nu_NLP_absapprox_true_n100[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_true_n100, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_absapprox_noPrior_true_n100 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_absapprox_noPrior_true_n100 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_Tukeys_nu_absapprox_true_n100 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n100 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n100
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_absapprox_noPrior_true_n100[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100$return_code
+  phi_star_Tukeys_nu_absapprox_noPrior_true_n100[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100$par[1:(p_dim + 2)]
+
+  SMIC_H_score_Tukeys_nu_absapprox_true_n100[j] <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = true_n100_data[[j]]$data_y, X = true_n100_data[[j]]$data_X, beta = phi_star_Tukeys_nu_absapprox_noPrior_true_n100[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_true_n100[j,p_dim + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_true_n100[j,p_dim + 2], k_abs = 100, k_sigmoid = 100)
+  
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Comparison - Laplace-Approximations
+
+$\mathcal{H}$-score selection decision and comparison of MAP point estimates across repeats.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox__nu_LP_vs_NLP_true_n100, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+### $\mathcal{H}$-score
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\mathcal{H}$-score difference", ylim = c(-30, 30))
+points(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, type = "b", col = "dark green", lwd = 3, lty = 1)
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+legend("topright",c(expression(paste("Tukey's, ", kappa, ", LP")), expression(paste("Tukey's, ", nu, ", LP"))), col = c("green", "dark green"), lwd = rep(3, 2), lty = c(1, 1), bg = "white", cex = 0.65)
+
+### kappa
+
+plot(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n100[,p_dim + 2]), type = "b", lty = 1, col = "green", xlab = "Repeat Index", ylab = expression(kappa), lwd = 3, ylim = c(0, 10))
+points(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n100[,p_dim + 2]), type = "b", lty = 2, col = "dark green", lwd = 3)
+
+### sigma2
+
+plot(1:N_rep, phi_star_squared_error_true_n100[, p_dim + 1], type = "b", lty = 1, col = "red", xlab = "Repeat Index", ylab = expression(sigma^2), lwd = 3, ylim = c(0, 2))
+points(1:N_rep, phi_star_Tukeys_nu_LP_absapprox_true_n100[, p_dim + 1], type = "b", lty = 2, col = "green", lwd = 3)
+points(1:N_rep, phi_star_Tukeys_nu_NLP_absapprox_true_n100[, p_dim + 1], type = "b", lty = 2, col = "dark green", lwd = 3)
+abline(h = 1, lwd = 3, lty = 2, col = "grey")
+
+### SMIC
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n100 - SMIC_H_score_Tukeys_nu_absapprox_true_n100, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-30, 30))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+## Gaussian errors - n = 1000 {.tabset}
+
+### Data generation
+
+Generating the Gaussian regression data set
+
+```{r true_experiments_data_sim_n1000, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+set.seed(25)
+
+N_rep <- 100
+n_obs <- 1000
+p_dim <- 6
+
+theta_gen <- c(0,0.5,1,1.5,0,0)
+
+mu <- 0
+sigma2 <- 1
+
+true_n1000_data <- list()
+
+predictor_covariance <- matrix(0.5,nrow=p_dim-1,ncol=p_dim-1) + diag(0.5,p_dim-1)
+
+library(mvtnorm)
+library(rmutil)
+for(i in 1:N_rep){
+  data_X <- cbind(1,rmvnorm(n_obs, mean = rep(0,p_dim-1), sigma = predictor_covariance))
+  data_y <- theta_gen %*% t(data_X) + rnorm(n_obs, mu, sqrt(sigma2))
+  true_n1000_data[[i]] <- list("data_X" = data_X, "data_y" = drop(data_y))
+}
+
+
+```
+
+### Gaussian model, Laplace Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_true_n1000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_true_n1000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_true_n1000 <- rep(NA, N_rep)## Optimisation errors
+
+H_star_squared_error_true_n1000 <- rep(NA, N_rep)## Hscore
+mlog_pi0_star_squared_error_true_n1000 <- rep(NA, N_rep)## Prior
+log_P_star_squared_error_true_n1000 <- rep(NA, N_rep)## P_star
+hessian_H_star_squared_error_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian $\mathcal{H}$-score
+hessian_mlog_pi0_star_squared_error_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian Prior 
+A_star_squared_error_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian
+hat_H_score_squared_error_true_n1000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_data_true_n1000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n1000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n1000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_true_n1000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_true_n1000
+#  , init = list(c1 = list(mu = 0, sigma2 = 1))
+, hessian = TRUE
+  )
+
+  return_code_squared_error_true_n1000[j] <- Hyvarinen_Bayesnorm_linearmodel_true_n1000$return_code
+  phi_star_squared_error_true_n1000[j,] <- Hyvarinen_Bayesnorm_linearmodel_true_n1000$par[1:(p_dim + 1)]
+  
+  ### evaluating P_star
+  H_star_squared_error_true_n1000[j] <- sum(H_score_norm(x = true_n1000_data[[j]]$data_y, mu = true_n1000_data[[j]]$data_X%*%phi_star_squared_error_true_n1000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n1000[j,p_dim + 1], w = 1))
+  mlog_pi0_star_squared_error_true_n1000[j] <- NIG_mlog_prior_regression(beta = phi_star_squared_error_true_n1000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  log_P_star_squared_error_true_n1000[j] <- - H_star_squared_error_true_n1000[j] - mlog_pi0_star_squared_error_true_n1000[j]
+  ### Hessians
+  hessian_H_star_squared_error_true_n1000[j,,] <- apply(hess_H_score_norm_regression(y = true_n1000_data[[j]]$data_y, X = true_n1000_data[[j]]$data_X, beta = phi_star_squared_error_true_n1000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n1000[j,p_dim + 1]), c(1, 2), sum)
+  hessian_mlog_pi0_star_squared_error_true_n1000[j,,] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_true_n1000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  A_star_squared_error_true_n1000[j,,] <- -(- hessian_mlog_pi0_star_squared_error_true_n1000[j,,] - hessian_H_star_squared_error_true_n1000[j,,])
+  ### Lapalce Approximation 
+  hat_H_score_squared_error_true_n1000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_true_n1000[j], A = A_star_squared_error_true_n1000[j,,], p = p_dim + 1)
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_true_n1000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_noPrior_true_n1000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_noPrior_true_n1000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_squared_error_true_n1000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n1000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n1000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n1000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n1000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n1000
+  , init = list(beta = theta_gen, sigma2 = 1)
+#, hessian = TRUE
+  )
+
+  return_code_squared_error_noPrior_true_n1000[j] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n1000$return_code
+  phi_star_squared_error_noPrior_true_n1000[j,] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n1000$par[1:(p_dim + 1)]
+    
+  SMIC_H_score_squared_error_true_n1000[j] <- SMIC_H_score_norm_regression(y = true_n1000_data[[j]]$data_y, X = true_n1000_data[[j]]$data_X, beta = phi_star_squared_error_noPrior_true_n1000[j,1:p_dim], sigma2 = phi_star_squared_error_noPrior_true_n1000[j,p_dim + 1])
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_LP_linearmodel_absapprox_LaplaceApprox_true_n1000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+phi_star_Tukeys_nu_LP_absapprox_true_n1000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_LP_absapprox_true_n1000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_LP_absapprox_true_n1000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_LP_absapprox_true_n1000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_LP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_LP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_LP_absapprox_true_n1000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n1000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n1000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n1000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n1000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n1000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_LP_absapprox_true_n1000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n1000$return_code
+  phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n1000$par[1:(p_dim + 2)]
+    
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dnorm(phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 2], nu_a_0, nu_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_LP_absapprox_true_n1000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n1000_data[[j]]$data_y, mu = true_n1000_data[[j]]$data_X%*%phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_LP_absapprox_true_n1000[j] <- - H_star_Tukeys_nu_LP_absapprox_true_n1000[j] - mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j]
+  
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j, (p_dim + 2), (p_dim + 2)] <- 1/nu_b_0^2
+
+  hessian_H_star_Tukeys_nu_LP_absapprox_true_n1000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n1000_data[[j]]$data_y, X = true_n1000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_LP_absapprox_true_n1000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_LP_absapprox_true_n1000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n1000[j,,] - hessian_H_star_Tukeys_nu_LP_absapprox_true_n1000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_LP_absapprox_true_n1000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_LP_absapprox_true_n1000[j], A = A_star_Tukeys_nu_LP_absapprox_true_n1000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, non-local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_true_n1000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_NLP_absapprox_true_n1000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_NLP_absapprox_true_n1000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_NLP_absapprox_true_n1000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_NLP_absapprox_true_n1000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_NLP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_NLP_absapprox_true_n1000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_NLP_absapprox_true_n1000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n1000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n1000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n1000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n1000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n1000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_true_n1000[j] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n1000$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n1000$par[1:(p_dim + 2)]
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_NLP_absapprox_true_n1000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n1000_data[[j]]$data_y, mu = true_n1000_data[[j]]$data_X%*%phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+    log_P_star_Tukeys_nu_NLP_absapprox_true_n1000[j] <- - H_star_Tukeys_nu_NLP_absapprox_true_n1000[j] - mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j]
+
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j, (p_dim + 2), (p_dim + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+  hessian_H_star_Tukeys_nu_NLP_absapprox_true_n1000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n1000_data[[j]]$data_y, X = true_n1000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_true_n1000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_NLP_absapprox_true_n1000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n1000[j,,] - hessian_H_star_Tukeys_nu_NLP_absapprox_true_n1000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_NLP_absapprox_true_n1000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_true_n1000[j], A = A_star_Tukeys_nu_NLP_absapprox_true_n1000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_true_n1000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_absapprox_noPrior_true_n1000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_absapprox_noPrior_true_n1000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_Tukeys_nu_absapprox_true_n1000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n1000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n1000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n1000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n1000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n1000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_absapprox_noPrior_true_n1000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n1000$return_code
+  phi_star_Tukeys_nu_absapprox_noPrior_true_n1000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n1000$par[1:(p_dim + 2)]
+
+  SMIC_H_score_Tukeys_nu_absapprox_true_n1000[j] <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = true_n1000_data[[j]]$data_y, X = true_n1000_data[[j]]$data_X, beta = phi_star_Tukeys_nu_absapprox_noPrior_true_n1000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_true_n1000[j,p_dim + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_true_n1000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100)
+  
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Comparison - Laplace-Approximations
+
+$\mathcal{H}$-score selection decision and comparison of MAP point estimates across repeats.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox__nu_LP_vs_NLP_true_n1000, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+### $\mathcal{H}$-score
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\mathcal{H}$-score difference", ylim = c(-30, 30))
+points(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, type = "b", col = "dark green", lwd = 3, lty = 1)
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+legend("topright",c(expression(paste("Tukey's, ", kappa, ", LP")), expression(paste("Tukey's, ", nu, ", LP"))), col = c("green", "dark green"), lwd = rep(3, 2), lty = c(1, 1), bg = "white", cex = 0.65)
+
+### kappa
+
+plot(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n1000[,p_dim + 2]), type = "b", lty = 1, col = "green", xlab = "Repeat Index", ylab = expression(kappa), lwd = 3, ylim = c(0, 10))
+points(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n1000[,p_dim + 2]), type = "b", lty = 2, col = "dark green", lwd = 3)
+
+### sigma2
+
+plot(1:N_rep, phi_star_squared_error_true_n1000[, p_dim + 1], type = "b", lty = 1, col = "red", xlab = "Repeat Index", ylab = expression(sigma^2), lwd = 3, ylim = c(0, 2))
+points(1:N_rep, phi_star_Tukeys_nu_LP_absapprox_true_n1000[, p_dim + 1], type = "b", lty = 2, col = "green", lwd = 3)
+points(1:N_rep, phi_star_Tukeys_nu_NLP_absapprox_true_n1000[, p_dim + 1], type = "b", lty = 2, col = "dark green", lwd = 3)
+abline(h = 1, lwd = 3, lty = 2, col = "grey")
+
+### SMIC
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n1000 - SMIC_H_score_Tukeys_nu_absapprox_true_n1000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-30, 30))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+## Gaussian errors - n = 10000 {.tabset}
+
+### Data generation
+
+Generating the Gaussian regression data set.
+
+```{r true_experiments_data_sim_n10000, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+set.seed(25)
+
+N_rep <- 100
+n_obs <- 10000
+p_dim <- 6
+
+theta_gen <- c(0,0.5,1,1.5,0,0)
+
+mu <- 0
+sigma2 <- 1
+
+true_n10000_data <- list()
+
+predictor_covariance <- matrix(0.5,nrow=p_dim-1,ncol=p_dim-1) + diag(0.5,p_dim-1)
+
+library(mvtnorm)
+library(rmutil)
+for(i in 1:N_rep){
+  data_X <- cbind(1,rmvnorm(n_obs, mean = rep(0,p_dim-1), sigma = predictor_covariance))
+  data_y <- theta_gen %*% t(data_X) + rnorm(n_obs, mu, sqrt(sigma2))
+  true_n10000_data[[i]] <- list("data_X" = data_X, "data_y" = drop(data_y))
+}
+
+
+```
+
+### Gaussian model, Laplace Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_true_n10000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_true_n10000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_true_n10000 <- rep(NA, N_rep)## Optimisation errors
+
+H_star_squared_error_true_n10000 <- rep(NA, N_rep)## Hscore
+mlog_pi0_star_squared_error_true_n10000 <- rep(NA, N_rep)## Prior
+log_P_star_squared_error_true_n10000 <- rep(NA, N_rep)## P_star
+hessian_H_star_squared_error_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian $\mathcal{H}$-score
+hessian_mlog_pi0_star_squared_error_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian Prior 
+A_star_squared_error_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian
+hat_H_score_squared_error_true_n10000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_data_true_n10000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n10000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n10000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_true_n10000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_true_n10000
+#  , init = list(c1 = list(mu = 0, sigma2 = 1))
+, hessian = TRUE
+  )
+
+  return_code_squared_error_true_n10000[j] <- Hyvarinen_Bayesnorm_linearmodel_true_n10000$return_code
+  phi_star_squared_error_true_n10000[j,] <- Hyvarinen_Bayesnorm_linearmodel_true_n10000$par[1:(p_dim + 1)]
+  
+  ### evaluating P_star
+  H_star_squared_error_true_n10000[j] <- sum(H_score_norm(x = true_n10000_data[[j]]$data_y, mu = true_n10000_data[[j]]$data_X%*%phi_star_squared_error_true_n10000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n10000[j,p_dim + 1], w = 1))
+  mlog_pi0_star_squared_error_true_n10000[j] <- NIG_mlog_prior_regression(beta = phi_star_squared_error_true_n10000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  log_P_star_squared_error_true_n10000[j] <- - H_star_squared_error_true_n10000[j] - mlog_pi0_star_squared_error_true_n10000[j]
+  ### Hessians
+  hessian_H_star_squared_error_true_n10000[j,,] <- apply(hess_H_score_norm_regression(y = true_n10000_data[[j]]$data_y, X = true_n10000_data[[j]]$data_X, beta = phi_star_squared_error_true_n10000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n10000[j,p_dim + 1]), c(1, 2), sum)
+  hessian_mlog_pi0_star_squared_error_true_n10000[j,,] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_true_n10000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  A_star_squared_error_true_n10000[j,,] <- -(- hessian_mlog_pi0_star_squared_error_true_n10000[j,,] - hessian_H_star_squared_error_true_n10000[j,,])
+  ### Lapalce Approximation 
+  hat_H_score_squared_error_true_n10000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_true_n10000[j], A = A_star_squared_error_true_n10000[j,,], p = p_dim + 1)
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_true_n10000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_noPrior_true_n10000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_noPrior_true_n10000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_squared_error_true_n10000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n10000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n10000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n10000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n10000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n10000
+  , init = list(beta = theta_gen, sigma2 = 1)
+#, hessian = TRUE
+  )
+
+  return_code_squared_error_noPrior_true_n10000[j] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n10000$return_code
+  phi_star_squared_error_noPrior_true_n10000[j,] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n10000$par[1:(p_dim + 1)]
+    
+  SMIC_H_score_squared_error_true_n10000[j] <- SMIC_H_score_norm_regression(y = true_n10000_data[[j]]$data_y, X = true_n10000_data[[j]]$data_X, beta = phi_star_squared_error_noPrior_true_n10000[j,1:p_dim], sigma2 = phi_star_squared_error_noPrior_true_n10000[j,p_dim + 1])
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_LP_linearmodel_absapprox_LaplaceApprox_true_n10000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+phi_star_Tukeys_nu_LP_absapprox_true_n10000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_LP_absapprox_true_n10000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_LP_absapprox_true_n10000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_LP_absapprox_true_n10000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_LP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_LP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_LP_absapprox_true_n10000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n10000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n10000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n10000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n10000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n10000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_LP_absapprox_true_n10000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n10000$return_code
+  phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n10000$par[1:(p_dim + 2)]
+    
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dnorm(phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 2], nu_a_0, nu_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_LP_absapprox_true_n10000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n10000_data[[j]]$data_y, mu = true_n10000_data[[j]]$data_X%*%phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_LP_absapprox_true_n10000[j] <- - H_star_Tukeys_nu_LP_absapprox_true_n10000[j] - mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j]
+  
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j, (p_dim + 2), (p_dim + 2)] <- 1/nu_b_0^2
+
+  hessian_H_star_Tukeys_nu_LP_absapprox_true_n10000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n10000_data[[j]]$data_y, X = true_n10000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_LP_absapprox_true_n10000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_LP_absapprox_true_n10000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n10000[j,,] - hessian_H_star_Tukeys_nu_LP_absapprox_true_n10000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_LP_absapprox_true_n10000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_LP_absapprox_true_n10000[j], A = A_star_Tukeys_nu_LP_absapprox_true_n10000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, non-local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_true_n10000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_NLP_absapprox_true_n10000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_NLP_absapprox_true_n10000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_NLP_absapprox_true_n10000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_NLP_absapprox_true_n10000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_NLP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_NLP_absapprox_true_n10000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_NLP_absapprox_true_n10000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n10000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n10000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n10000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n10000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n10000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_true_n10000[j] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n10000$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n10000$par[1:(p_dim + 2)]
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_NLP_absapprox_true_n10000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n10000_data[[j]]$data_y, mu = true_n10000_data[[j]]$data_X%*%phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+      log_P_star_Tukeys_nu_NLP_absapprox_true_n10000[j] <- - H_star_Tukeys_nu_NLP_absapprox_true_n10000[j] - mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j]
+
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j, (p_dim + 2), (p_dim + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+  hessian_H_star_Tukeys_nu_NLP_absapprox_true_n10000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n10000_data[[j]]$data_y, X = true_n10000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_true_n10000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_NLP_absapprox_true_n10000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n10000[j,,] - hessian_H_star_Tukeys_nu_NLP_absapprox_true_n10000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_NLP_absapprox_true_n10000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_true_n10000[j], A = A_star_Tukeys_nu_NLP_absapprox_true_n10000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_true_n10000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_absapprox_noPrior_true_n10000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_absapprox_noPrior_true_n10000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_Tukeys_nu_absapprox_true_n10000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n10000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n10000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n10000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n10000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n10000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_absapprox_noPrior_true_n10000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n10000$return_code
+  phi_star_Tukeys_nu_absapprox_noPrior_true_n10000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n10000$par[1:(p_dim + 2)]
+
+  SMIC_H_score_Tukeys_nu_absapprox_true_n10000[j] <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = true_n10000_data[[j]]$data_y, X = true_n10000_data[[j]]$data_X, beta = phi_star_Tukeys_nu_absapprox_noPrior_true_n10000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_true_n10000[j,p_dim + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_true_n10000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100)
+  
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Comparison - Laplace-Approximations
+
+$\mathcal{H}$-score selection decision and comparison of MAP point estimates across repeats.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox__nu_LP_vs_NLP_true_n10000, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+### $\mathcal{H}$-score
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\mathcal{H}$-score difference", ylim = c(-30, 30))
+points(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, type = "b", col = "dark green", lwd = 3, lty = 1)
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+legend("topright",c(expression(paste("Tukey's, ", kappa, ", LP")), expression(paste("Tukey's, ", nu, ", LP"))), col = c("green", "dark green"), lwd = rep(3, 2), lty = c(1, 1), bg = "white", cex = 0.65)
+
+### kappa
+
+plot(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n10000[,p_dim + 2]), type = "b", lty = 1, col = "green", xlab = "Repeat Index", ylab = expression(kappa), lwd = 3, ylim = c(0, 10))
+points(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n10000[,p_dim + 2]), type = "b", lty = 2, col = "dark green", lwd = 3)
+
+### sigma2
+
+plot(1:N_rep, phi_star_squared_error_true_n10000[, p_dim + 1], type = "b", lty = 1, col = "red", xlab = "Repeat Index", ylab = expression(sigma^2), lwd = 3, ylim = c(0, 2))
+points(1:N_rep, phi_star_Tukeys_nu_LP_absapprox_true_n10000[, p_dim + 1], type = "b", lty = 2, col = "green", lwd = 3)
+points(1:N_rep, phi_star_Tukeys_nu_NLP_absapprox_true_n10000[, p_dim + 1], type = "b", lty = 2, col = "dark green", lwd = 3)
+abline(h = 1, lwd = 3, lty = 2, col = "grey")
+
+### SMIC
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n10000 - SMIC_H_score_Tukeys_nu_absapprox_true_n10000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-30, 30))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+## Gaussian errors - n = 100000 {.tabset}
+
+### Data generation
+
+Generating the Gaussian regression data set.
+
+```{r true_experiments_data_sim_n100000, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+set.seed(25)
+
+N_rep <- 100
+n_obs <- 100000
+p_dim <- 6
+
+theta_gen <- c(0,0.5,1,1.5,0,0)
+
+mu <- 0
+sigma2 <- 1
+
+true_n100000_data <- list()
+
+predictor_covariance <- matrix(0.5,nrow=p_dim-1,ncol=p_dim-1) + diag(0.5,p_dim-1)
+
+library(mvtnorm)
+library(rmutil)
+for(i in 1:N_rep){
+  data_X <- cbind(1,rmvnorm(n_obs, mean = rep(0,p_dim-1), sigma = predictor_covariance))
+  data_y <- theta_gen %*% t(data_X) + rnorm(n_obs, mu, sqrt(sigma2))
+  true_n100000_data[[i]] <- list("data_X" = data_X, "data_y" = drop(data_y))
+}
+
+
+```
+
+### Gaussian model, Laplace Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_true_n100000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_true_n100000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_true_n100000 <- rep(NA, N_rep)## Optimisation errors
+
+H_star_squared_error_true_n100000 <- rep(NA, N_rep)## Hscore
+mlog_pi0_star_squared_error_true_n100000 <- rep(NA, N_rep)## Prior
+log_P_star_squared_error_true_n100000 <- rep(NA, N_rep)## P_star
+hessian_H_star_squared_error_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian $\mathcal{H}$-score
+hessian_mlog_pi0_star_squared_error_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian Prior 
+A_star_squared_error_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 1, p_dim + 1))## Hessian
+hat_H_score_squared_error_true_n100000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_data_true_n100000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_true_n100000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_stan, data = Hyvarinen_Bayesnorm_linearmodel_data_true_n100000
+#  , init = list(c1 = list(mu = 0, sigma2 = 1))
+, hessian = TRUE
+  )
+
+  return_code_squared_error_true_n100000[j] <- Hyvarinen_Bayesnorm_linearmodel_true_n100000$return_code
+  phi_star_squared_error_true_n100000[j,] <- Hyvarinen_Bayesnorm_linearmodel_true_n100000$par[1:(p_dim + 1)]
+  
+  ### evaluating P_star
+  H_star_squared_error_true_n100000[j] <- sum(H_score_norm(x = true_n100000_data[[j]]$data_y, mu = true_n100000_data[[j]]$data_X%*%phi_star_squared_error_true_n100000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100000[j,p_dim + 1], w = 1))
+  mlog_pi0_star_squared_error_true_n100000[j] <- NIG_mlog_prior_regression(beta = phi_star_squared_error_true_n100000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  log_P_star_squared_error_true_n100000[j] <- - H_star_squared_error_true_n100000[j] - mlog_pi0_star_squared_error_true_n100000[j]
+  ### Hessians
+  hessian_H_star_squared_error_true_n100000[j,,] <- apply(hess_H_score_norm_regression(y = true_n100000_data[[j]]$data_y, X = true_n100000_data[[j]]$data_X, beta = phi_star_squared_error_true_n100000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100000[j,p_dim + 1]), c(1, 2), sum)
+  hessian_mlog_pi0_star_squared_error_true_n100000[j,,] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_squared_error_true_n100000[j,1:p_dim], sigma2 = phi_star_squared_error_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  
+  A_star_squared_error_true_n100000[j,,] <- -(- hessian_mlog_pi0_star_squared_error_true_n100000[j,,] - hessian_H_star_squared_error_true_n100000[j,,])
+  ### Lapalce Approximation 
+  hat_H_score_squared_error_true_n100000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_squared_error_true_n100000[j], A = A_star_squared_error_true_n100000[j,,], p = p_dim + 1)
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Gaussian model, SMIC
+
+SMIC for the Gaussian model.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_SMIC_true_n100000, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+phi_star_squared_error_noPrior_true_n100000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 1)## parameters
+return_code_squared_error_noPrior_true_n100000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_squared_error_true_n100000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n100000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, w = 1)
+    
+  Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100000 <- optimizing(object = Hyvarinen_Bayesnorm_linearmodel_noPrior_stan, data = Hyvarinen_Bayesnorm_linearmodel_noPrior_data_true_n100000
+  , init = list(beta = theta_gen, sigma2 = 1)
+#, hessian = TRUE
+  )
+
+  return_code_squared_error_noPrior_true_n100000[j] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100000$return_code
+  phi_star_squared_error_noPrior_true_n100000[j,] <- Hyvarinen_Bayesnorm_linearmodel_noPrior_true_n100000$par[1:(p_dim + 1)]
+    
+  SMIC_H_score_squared_error_true_n100000[j] <- SMIC_H_score_norm_regression(y = true_n100000_data[[j]]$data_y, X = true_n100000_data[[j]]$data_X, beta = phi_star_squared_error_noPrior_true_n100000[j,1:p_dim], sigma2 = phi_star_squared_error_noPrior_true_n100000[j,p_dim + 1])
+  
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_LP_linearmodel_absapprox_LaplaceApprox_true_n100000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+
+phi_star_Tukeys_nu_LP_absapprox_true_n100000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_LP_absapprox_true_n100000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_LP_absapprox_true_n100000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_LP_absapprox_true_n100000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_LP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_LP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_LP_absapprox_true_n100000 <- rep(NA, N_rep)## Estimate
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n100000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_data_true_n100000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_LP_absapprox_true_n100000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100000$return_code
+  phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_true_n100000$par[1:(p_dim + 2)]
+    
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dnorm(phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 2], nu_a_0, nu_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_LP_absapprox_true_n100000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n100000_data[[j]]$data_y, mu = true_n100000_data[[j]]$data_X%*%phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_LP_absapprox_true_n100000[j] <- - H_star_Tukeys_nu_LP_absapprox_true_n100000[j] - mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j]
+  
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j, (p_dim + 2), (p_dim + 2)] <- 1/nu_b_0^2
+
+  hessian_H_star_Tukeys_nu_LP_absapprox_true_n100000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n100000_data[[j]]$data_y, X = true_n100000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_LP_absapprox_true_n100000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_LP_absapprox_true_n100000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_LP_absapprox_true_n100000[j,,] - hessian_H_star_Tukeys_nu_LP_absapprox_true_n100000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_LP_absapprox_true_n100000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_LP_absapprox_true_n100000[j], A = A_star_Tukeys_nu_LP_absapprox_true_n100000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, non-local prior, Laplace-Approximations
+
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_true_n100000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_NLP_absapprox_true_n100000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_NLP_absapprox_true_n100000 <- rep(NA, N_rep)## Optimisation errors
+
+mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000 <- rep(NA, N_rep)## Prior
+hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian Prior 
+
+H_star_Tukeys_nu_NLP_absapprox_true_n100000 <- rep(NA, N_rep)## Hscore
+log_P_star_Tukeys_nu_NLP_absapprox_true_n100000 <- rep(NA, N_rep)## P_star
+hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian $\mathcal{H}$-score
+A_star_Tukeys_nu_NLP_absapprox_true_n100000 <- array(NA, dim = c(N_rep, p_dim + 2, p_dim + 2))## Hessian
+hat_H_score_Tukeys_nu_NLP_absapprox_true_n100000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n100000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_NLP_a_0, nu_p2 = nu_NLP_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_stan, data = Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_data_true_n100000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_NLP_absapprox_true_n100000[j] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100000$return_code
+  phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,] <- Hyvarinen_TukeysBayesnorm_nu_NLP_varThresh_absapprox_linearmodel_true_n100000$par[1:(p_dim + 2)]
+  
+  ### evaluating P_star
+
+  mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j] <- NIG_mlog_prior_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0) - dinvgamma(phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 2], shape = nu_NLP_a_0, scale = nu_NLP_b_0, log = TRUE)
+  
+  H_star_Tukeys_nu_NLP_absapprox_true_n100000[j] <- sum(H_score_tukey_varThresh_absapprox(x = true_n100000_data[[j]]$data_y, mu = true_n100000_data[[j]]$data_X%*%phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 1], c = 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 2]), k_abs = 100, k_sigmoid = 100))
+  
+  log_P_star_Tukeys_nu_NLP_absapprox_true_n100000[j] <- - H_star_Tukeys_nu_NLP_absapprox_true_n100000[j] - mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j]
+
+  ### Hessians
+
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j, 1:(p_dim + 1), 1:(p_dim + 1)] <- NIG_mlog_prior_Hessian_regression(beta = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 1], a_0, b_0, beta_0 = rep(mu_0, p_dim), kappa_0 = 1/v_0)
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j, (p_dim + 2), ] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j, , (p_dim + 2)] <- 0
+  hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j, (p_dim + 2), (p_dim + 2)] <- inverse_gamma_mlog_prior_Hessian(phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 2], a_0 = nu_NLP_a_0, b_0 = nu_NLP_b_0)
+  
+  hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100000[j,,] <- apply(hess_H_score_Tukeys_regression_absapprox_repar(y = true_n100000_data[[j]]$data_y, X = true_n100000_data[[j]]$data_X, beta =  phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 1], nu =  phi_star_Tukeys_nu_NLP_absapprox_true_n100000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100), c(1, 2), sum)
+  
+  A_star_Tukeys_nu_NLP_absapprox_true_n100000[j,,] <- - ( - hessian_mlog_pi0_star_Tukeys_nu_NLP_absapprox_true_n100000[j,,] - hessian_H_star_Tukeys_nu_NLP_absapprox_true_n100000[j,,])
+  
+  ### Lapalce Approximation 
+  
+  hat_H_score_Tukeys_nu_NLP_absapprox_true_n100000[j] <- log_laplace_approximation_marg_lik(log_P_star = log_P_star_Tukeys_nu_NLP_absapprox_true_n100000[j], A = A_star_Tukeys_nu_NLP_absapprox_true_n100000[j,,], p = p_dim + 2)
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+
+```
+
+### Tukey's loss, absapprox, nu, SMIC
+
+SMIC for the Tukey's loss improper model.
+
+```{r Hyvarinen_TukeysBayesnorm_nu_linearmodel_absapprox_SMIC_true_n100000, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
+
+phi_star_Tukeys_nu_absapprox_noPrior_true_n100000 <- matrix(NA, nrow = N_rep, ncol = p_dim + 2)## parameters
+return_code_Tukeys_nu_absapprox_noPrior_true_n100000 <- rep(NA, N_rep)## Optimisation errors
+
+SMIC_H_score_Tukeys_nu_absapprox_true_n100000 <- rep(NA, N_rep)## Estimate
+
+
+for(j in 1:N_rep){
+
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n100000 <- list(n = n_obs, p = p_dim, y = as.matrix(true_n100000_data[[j]]$data_y, nrow = n_obs, ncol = 1), X = true_n100000_data[[j]]$data_X, mu_beta = mu_0, beta_s = v_0, sig_p1 = a_0, sig_p2 = b_0, nu_p1 = nu_a_0, nu_p2 = nu_b_0, w = 1)
+    
+  Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100000 <- optimizing(object = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_stan, data = Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_data_true_n100000
+  , init = list(beta = theta_gen, sigma2 = 1, nu = 1/5^2)
+#  , hessian = TRUE
+#  , verbose = TRUE
+  )
+  
+  return_code_Tukeys_nu_absapprox_noPrior_true_n100000[j] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100000$return_code
+  phi_star_Tukeys_nu_absapprox_noPrior_true_n100000[j,] <- Hyvarinen_TukeysBayesnorm_nu_varThresh_absapprox_linearmodel_noPrior_true_n100000$par[1:(p_dim + 2)]
+
+  SMIC_H_score_Tukeys_nu_absapprox_true_n100000[j] <- SMIC_H_score_Tukeys_regression_absapprox_repar(y = true_n100000_data[[j]]$data_y, X = true_n100000_data[[j]]$data_X, beta = phi_star_Tukeys_nu_absapprox_noPrior_true_n100000[j,1:p_dim], sigma2 = phi_star_Tukeys_nu_absapprox_noPrior_true_n100000[j,p_dim + 1], nu = phi_star_Tukeys_nu_absapprox_noPrior_true_n100000[j,p_dim + 2], k_abs = 100, k_sigmoid = 100)
+  
+    
+  if((j %% (N_rep/10)) == 1){
+    cat("Repeat", j, "done", "\n")
+  }
+}
+```
+
+### Comparison - Laplace-Approximations
+
+$\mathcal{H}$-score selection decision and comparison of MAP point estimates across repeats.
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox__nu_LP_vs_NLP_true_n100000, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, dev.args = list(png = list(type = "cairo")), fig.height = 3.5, fig.width = 7}
+
+### $\mathcal{H}$-score
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\mathcal{H}$-score difference", ylim = c(-30, 30))
+points(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000, type = "b", col = "dark green", lwd = 3, lty = 1)
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+legend("topright",c(expression(paste("Tukey's, ", kappa, ", LP")), expression(paste("Tukey's, ", nu, ", LP"))), col = c("green", "dark green"), lwd = rep(3, 2), lty = c(1, 1), bg = "white", cex = 0.65)
+
+### kappa
+
+plot(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_LP_absapprox_true_n100000[,p_dim + 2]), type = "b", lty = 1, col = "green", xlab = "Repeat Index", ylab = expression(kappa), lwd = 3, ylim = c(0, 10))
+points(1:N_rep, 1/sqrt(phi_star_Tukeys_nu_NLP_absapprox_true_n100000[,p_dim + 2]), type = "b", lty = 2, col = "dark green", lwd = 3)
+
+### sigma2
+
+plot(1:N_rep, phi_star_squared_error_true_n100000[, p_dim + 1], type = "b", lty = 1, col = "red", xlab = "Repeat Index", ylab = expression(sigma^2), lwd = 3, ylim = c(0, 2))
+points(1:N_rep, phi_star_Tukeys_nu_LP_absapprox_true_n100000[, p_dim + 1], type = "b", lty = 2, col = "green", lwd = 3)
+points(1:N_rep, phi_star_Tukeys_nu_NLP_absapprox_true_n100000[, p_dim + 1], type = "b", lty = 2, col = "dark green", lwd = 3)
+abline(h = 1, lwd = 3, lty = 2, col = "grey")
+
+### SMIC
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n100000 - SMIC_H_score_Tukeys_nu_absapprox_true_n100000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-30, 30))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+## Plots for the paper {.tabset}
+
+Producing the plots for Figure 3 of the paper.
+
+### LP
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox_nu_LP_true_n_comparison, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-15, 20), main = "$n = 100$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-15, 20), main = "$n = 1000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-15, 20), main = "$n = 10000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_LP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000, type = "b", lty = 1, col = "green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-15, 20), main = "$n = 100000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+sum(as.numeric((hat_H_score_Tukeys_nu_LP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000) > 0))
+
+```
+
+### NLP
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_LaplaceApprox_nu_NLP_true_n_convergence, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, type = "b", lty = 1, col = "dark green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-300, 50), main = "$n = 100$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, type = "b", lty = 1, col = "dark green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-300, 50), main = "$n = 1000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, type = "b", lty = 1, col = "dark green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-300, 50), main = "$n = 10000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, hat_H_score_Tukeys_nu_NLP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000, type = "b", lty = 1, col = "dark green", lwd = 3, xlab = "Repeat Index", ylab = "log-$\\mathcal{H}$-score difference", ylim = c(-300, 50), main = "$n = 100000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+### SMIC
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_SMIC_nu_true_n_convergence, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n100 - SMIC_H_score_Tukeys_nu_absapprox_true_n100, type = "b", lty = 1, col = "red", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-15, 20), main = "$n = 100$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n1000 - SMIC_H_score_Tukeys_nu_absapprox_true_n1000, type = "b", lty = 1, col = "red", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-15, 20), main = "$n = 1000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n10000 - SMIC_H_score_Tukeys_nu_absapprox_true_n10000, type = "b", lty = 1, col = "red", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-15, 20), main = "$n = 10000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+plot(1:N_rep, SMIC_H_score_squared_error_true_n100000 - SMIC_H_score_Tukeys_nu_absapprox_true_n100000, type = "b", lty = 1, col = "red", lwd = 3, xlab = "Repeat Index", ylab = "SMIC difference", ylim = c(-15, 20), main = "$n = 100000$")
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+sum(as.numeric((SMIC_H_score_squared_error_true_n100000 - SMIC_H_score_Tukeys_nu_absapprox_true_n100000) > 0))
+
+```
+
+### Boxplots Joint Comparison 
+
+
+
+```{r Hyvarinen_Bayesnorm_linearmodel_absapprox_nu_true_n_convergence2, include = TRUE, echo = TRUE, eval = TRUE,  cache = FALSE, fig.height = 6, fig.width = 5}
+
+par(mar = c(3.1, 3.3, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.5, cex.axis = 1.5, cex.main = 1.5)
+
+boxplot(cbind(SMIC_H_score_squared_error_true_n100 - SMIC_H_score_Tukeys_nu_absapprox_true_n100, SMIC_H_score_squared_error_true_n1000 - SMIC_H_score_Tukeys_nu_absapprox_true_n1000, SMIC_H_score_squared_error_true_n10000 - SMIC_H_score_Tukeys_nu_absapprox_true_n10000, 
+SMIC_H_score_squared_error_true_n100000 - SMIC_H_score_Tukeys_nu_absapprox_true_n100000), ylab = "Score Difference", main = "SMIC", col = c("grey"), axes = F, ylim = c(-15, 20))
+box(bty="l")
+axis(2)
+axis(1, at = c(1, 2, 3, 4), labels = c("$n = 10^2$", "$n = 10^3$", "$n = 10^4$", "$n = 10^5$"))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+boxplot(cbind(hat_H_score_Tukeys_nu_LP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, hat_H_score_Tukeys_nu_LP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, hat_H_score_Tukeys_nu_LP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, hat_H_score_Tukeys_nu_LP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000), ylab = "Score Difference", main = "$\\mathcal{H}$-score - LP", col = c("grey"), axes = F, ylim = c(-15, 20))
+box(bty="l")
+axis(2)
+axis(1, at = c(1, 2, 3, 4), labels = c("$n = 10^2$", "$n = 10^3$", "$n = 10^4$", "$n = 10^5$"))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+boxplot(cbind(hat_H_score_Tukeys_nu_NLP_absapprox_true_n100 - hat_H_score_squared_error_true_n100, hat_H_score_Tukeys_nu_NLP_absapprox_true_n1000 - hat_H_score_squared_error_true_n1000, hat_H_score_Tukeys_nu_NLP_absapprox_true_n10000 - hat_H_score_squared_error_true_n10000, hat_H_score_Tukeys_nu_NLP_absapprox_true_n100000 - hat_H_score_squared_error_true_n100000), ylab = "Score Difference", main = "$\\mathcal{H}$-score - NLP", col = c("grey"), axes = F, ylim = c(-350, 50))
+box(bty="l")
+axis(2)
+axis(1, at = c(1, 2, 3, 4), labels = c("$n = 10^2$", "$n = 10^3$", "$n = 10^4$", "$n = 10^5$"))
+abline(h = 0, lty = 2, lwd = 3, col = "grey")
+
+```
+
+
