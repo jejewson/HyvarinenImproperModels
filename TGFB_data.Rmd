@@ -52,7 +52,7 @@ library(org.Hs.eg.db)
 
 ### Hessian Functions and Priors
 
-Loading functions to set the priors and evaluate the Laplace approximations of the H-score.
+Loading functions to set the priors and evaluate the Laplace approximations of the $\mathcal{H}$-score.
 
 ```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
 setwd(paste(my.dir, "/R", sep = ""))
@@ -199,7 +199,7 @@ N_MCMC <- 1000
 
 ### Gaussian model
 
-Laplace approximation to the H-score for the Gaussian model.
+Laplace approximation to the $\mathcal{H}$-score for the Gaussian model.
 
 ```{r Hyvarinen_Bayesnorm_linearmodel_LaplaceApprox_tgfb172, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
 
@@ -254,7 +254,7 @@ SMIC_H_score_squared_error_true_tgfb172 <- SMIC_H_score_norm_regression(y = tgfb
 
 ### Tukey's loss, nu, non-local prior
 
-Laplace approximation to the H-score for the Tukey's loss improper model under the non-local prior.
+Laplace approximation to the $\mathcal{H}$-score for the Tukey's loss improper model under the non-local prior.
 
 ```{r Hyvarinen_TukeysBayesnorm_nu_NLP_linearmodel_absapprox_LaplaceApprox_tgfb172, include=TRUE,echo=TRUE, eval = TRUE, cache=TRUE}
 
@@ -321,11 +321,11 @@ SMIC_H_score_Tukeys_nu_absapprox_true_tgfb172 <- SMIC_H_score_Tukeys_regression_
 
 ### Selection
 
-H-score (maximising) and SMIC (minimising) selection.
+$\mathcal{H}$-score (maximising) and SMIC (minimising) selection.
 
 ```{r tgfb172_experiments_H_score_TukeysBayesnorm_varThresh_lm_diag_selection, include=TRUE,echo=TRUE, eval=TRUE, cache=FALSE}
 
-## H-score
+## $\mathcal{H}$-score
 
 hat_H_score_squared_error_tgfb172
 hat_H_score_Tukeys_nu_NLP_absapprox_tgfb172
