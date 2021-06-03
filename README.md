@@ -1,6 +1,6 @@
 # HyvarinenImproperModels
 
-HyvarinenImproperModels contains the *R* scripts and *stan* software to reproduce the experiments from the paper "General Bayesian Loss Function Selection and the use of Improper Models" J. Jewson and D. Rossell (2021). The article and supplemental material can be found at .....
+HyvarinenImproperModels contains the *R* scripts and *stan* software to reproduce the experiments from the paper "General Bayesian Loss Function Selection and the use of Improper Models" J. Jewson and D. Rossell (2021). The article and supplementary material can be found at *https://arxiv.org/pdf/2106.01214.pdf*.
 
 The repository contains the following .Rmd files:
 ```
