@@ -1,0 +1,129 @@
+---
+title: "Tsallis Score Improper Model"
+author: "Jack Jewson"
+date: "March 2022"
+output: html_document
+---
+
+Code to reproduce plots in Section A.3 of "General Bayesian Loss Function Selection and the use of Improper Models" Jewson and Rossell (2021).
+
+## Preamble {.tabset}
+
+### Working directory
+
+Change this to be the folder that the *stan* and *R* folders are stored in.
+
+```{r setwd, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+my.dir <- "/home/usuario/Documents/Barcelona_Yr1/HyvarinenScoreProject/HyvarinenImproperModels_Rcode"
+
+```
+
+### Packages
+
+Loading the required packages.
+
+```{r packages, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+
+library(RColorBrewer)
+
+```
+
+### Hessian Functions and Priors
+
+Loading functions to set the priors and evaluate the Laplace approximations of the $\mathcal{H}$-score.
+
+```{r functions, include=TRUE, echo=TRUE, eval=TRUE, cache=FALSE}
+setwd(paste(my.dir, "/R", sep = ""))
+
+source("HScore_fns_grads_hess.R")
+```
+
+## Tukey's improper model  vs Tsallis Normal improper model 
+
+Comparing Tukey's Loss imprope rmodel with the Tsallis socre applied to Gaussian density.
+
+### The Tsallis score applied to a Gaussian density
+
+```{r betaD_Normal_loss_function, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+#### betaD-loss (Gaussian) ####
+
+betaD_score_norm <- function(x, mu, sigma2,beta,w){
+  integral_term <- 1 / ((2*pi)^(beta/2)*(1+beta)^1.5*(sigma2^(beta/2)))
+  likelihood_term <- (1/beta)*dnorm(x, mu, sqrt(sigma2))^(beta)
+  return(w * likelihood_term - integral_term)
+}
+
+
+```
+
+```{r parameters, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+
+beta_values <- c(0.25, 0.5, 0.75)
+kappa_thresh <- c(2, 3, 4)
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#light_offset <- 2
+#greens <- brewer.pal(n = length(kappa_thresh) + light_offset, name = "Greens")
+light_offset <- 0
+greens <- rep("grey", length(beta_values))
+
+col2rgb(greens[2 + light_offset])
+
+```
+
+```{r Tsallis_loss_function, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, x_seq^2/2, type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma$", ylab = "$\\ell(y; \\theta, \\beta)$", col = "black", ylim = c(0, 4))
+for(i in 1:length(beta_values)){
+  points(x_seq, - betaD_score_norm(x_seq, mu = 0, sigma2 = 1, beta = beta_values[i], w = 1) + betaD_score_norm(0, mu = 0, sigma2 = 1, beta = beta_values[i], w = 1), type = "l", lwd = 3 , col = greens[i + light_offset], lty = length(beta_values) - i + 1)
+}
+legend("top", c("$\\beta = 0$", "$\\beta = 0.25$", "$\\beta = 0.5$", "$\\beta = 0.75$"), col = c("black", (greens)[1:3]), lwd = rep(3, 4), lty = c(1, 3:1), bty = "n", cex = 1.25)
+```
+
+```{r Tsallis_pseudo_density, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, dnorm(x_seq, 0, 1), type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma$", ylab = "$\\tilde{f}(y; \\theta, \\beta)$", col = "black")
+for(i in 1:length(beta_values)){
+  points(x_seq, exp(betaD_score_norm(x_seq, mu = 0, sigma2 = 1, beta = beta_values[i], w = 1))*dnorm(0, 0, 1)/exp(betaD_score_norm(0, mu = 0, sigma2 = 1, beta = beta_values[i], w = 1)), type = "l", lwd = 3 , col = greens[i + light_offset], lty = length(beta_values) - i + 1)
+}
+
+
+```
+
+
+```{r Tukeys_loss_function, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, x_seq^2/2, type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma$", ylab = "$\\ell(y; \\theta, \\kappa_2)$", col = "black", ylim = c(0, 4))
+for(i in 1:length(kappa_thresh)){
+  points(x_seq, tukey_loss(x_seq, kappa_thresh[i]), type = "l", lwd = 3 , col = greens[i + light_offset], lty = i)
+}
+legend("top", c("$\\kappa_2 = \\infty$", "$\\kappa_2 = 4$", "$\\kappa_2 = 3$", "$\\kappa_2 = 2$"), col = c("black", rev(greens)[1:3]), lwd = rep(3, 4), lty = c(1, 3:1), bty = "n", cex = 1.25)
+```
+
+
+```{r Tukeys_pseudo_density, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE, fig.height = 3, fig.width = 5}
+
+par(mar = c(3.3, 3.6, 1.5, 1.1))  # bottom, left, top, right
+par(mgp = c(2.15, 1, 0))
+par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
+
+plot(x_seq, dnorm(x_seq, 0, 1), type = "l", lwd = 3, xlab = "$(y - \\mu)/\\sigma$", ylab = "$\\tilde{f}(y; \\theta, \\kappa_2)$", col = "black")
+for(i in 1:length(kappa_thresh)){
+  points(x_seq, exp(-tukey_loss(x_seq, kappa_thresh[i]))*dnorm(0, 0, 1)/exp(-tukey_loss(0, kappa_thresh[i])), type = "l", lwd = 3 , col = greens[i + light_offset], lty = i)
+}
+
+```

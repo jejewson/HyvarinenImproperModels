@@ -167,7 +167,7 @@ Specifying the prior hyperparameters.
 
 mu_0 <- 0
 v_0 <- 5
-a_0 <- 2.01
+a_0 <- 2
 b_0 <- 0.5
 
 nu_NLP_a_0 <- a_0_nu_NLP_select

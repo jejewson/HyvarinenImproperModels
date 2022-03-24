@@ -30,6 +30,9 @@ library(nor1mix)
 library(dirichletprocess)
 library(rstan)
 rstan_options(auto_write = TRUE)
+
+library(mombf)
+library(actuar)
 ```
 
 ### Functions
@@ -40,19 +43,71 @@ Loading functions to evaluate kernel density estimates.
 setwd(paste(my.dir, "/R", sep = ""))
 
 source("KDE_fns.R")
+source("KDE_prior_fns.R")
 ```
 
 ### Prior Specification
 
-Specifying the prior hyperparameters.
+Specifying the prior hyperparameters using the method outlined in Section A.4.7
 
-```{r prior_specification, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+```{r prior_specification_KDE, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
 
-a_0 <- 1 #2
-b_0 <- 1 #0.5# 2 ## want very little mass at 0
-#w <- 1
+set.seed(76)
+
+n <- 1000#500
+N_MC <- 1000
+N_b_0_vect <- 30
+
+b_0_vect <- seq(0.01, 0.5, length.out = N_b_0_vect)
+ISE_KDE_Gaussian_hIG_eval <- matrix(NA, nrow = N_b_0_vect, ncol = N_MC)
+for(j in 1:N_b_0_vect){
+  ISE_KDE_Gaussian_hIG_eval[j, ] <- Exp_ISE_KDE_Gaussian_hIG(a_0 = 2, b_0 = b_0_vect[j], n, bar_y = 0, S_y = 1, N_MC)
+  cat("b_0 = ", b_0_vect[j], ", ISE = ", mean(ISE_KDE_Gaussian_hIG_eval[j, ]), "\n")
+}
+
+ISE_Gaussian_Gaussian_eval <- Exp_ISE_Gaussian_Gaussian(n, bar_y = 0, S_y = 1, N_MC)
+mean(ISE_Gaussian_Gaussian_eval)
+median(ISE_Gaussian_Gaussian_eval)
+rowMeans(ISE_KDE_Gaussian_hIG_eval)
+
+plot(b_0_vect, rowMeans(ISE_KDE_Gaussian_hIG_eval), type = "b", lwd = 3, ylim = c(0, max(rowMeans(ISE_KDE_Gaussian_hIG_eval))), xlab = "b_0", ylab = "EISE")
+abline(h = mean(ISE_Gaussian_Gaussian_eval), lwd = 3, col = "red")
+abline(h = 10*mean(ISE_Gaussian_Gaussian_eval), lwd = 3, col = "red", lty = 2)
+
+invgamma_prior_set <- rep(NA, 2)
+invgamma_prior_set[1] <- 2
+invgamma_prior_set[2] <- b_0_vect[which.min(rowMeans(ISE_KDE_Gaussian_hIG_eval))]
+invgamma_prior_set
+
+h_vect <- seq(0.001, 0.5, length.out = 1000)
+b_0 <- 1
+plot(h_vect, dinvgamma(h_vect, shape = invgamma_prior_set[1], scale = invgamma_prior_set[2]), lwd = 3, type = "l", xlab = "h", ylab = "Prior Density")
+
+### w neq 1
+
+set.seed(26)
+
+invgamma_exp_prior_set <- invgamma_exp_select(n, N_MC = 10000)
+invgamma_exp_prior_set$par
+invgamma_exp_prior_set$value
+
+h_vect <- seq(0.001, 0.5, length.out = 1000)
+plot(h_vect, dinvgamma(h_vect, shape = 2, scale = invgamma_exp_prior_set$par[1]), lwd = 3, type = "l", xlab = "h", ylab = "Prior Density", main = "w neq 1")
+w_vect <- seq(0.1, 3, length.out = 1000)
+plot(w_vect, dexp(w_vect, rate = invgamma_exp_prior_set$par[2]), lwd = 3, type = "l", xlab = "h", ylab = "Prior Density", main = "w neq 1")
+
+```
+
+```{r prior_specification_KDE_set, include=TRUE,echo=TRUE, eval = TRUE,  cache=TRUE}
+
+a_0_set <- invgamma_prior_set[1]
+b_0_set <- invgamma_prior_set[2]
+
+a_0_w_set <- 2
+b_0_w_set <- invgamma_exp_prior_set$par[1]
+c_0_w_set <- invgamma_exp_prior_set$par[2]
+
 N_MCMC <- 5000
-
 N_mcmc <- 1000
 
 ```
@@ -66,7 +121,10 @@ setwd(paste(my.dir, "/stan", sep = ""))
 
 Hyvarinen_GaussianKernelDensityEstimation_stan <- stan_model(file = "Hyvarinen_GaussianKernelDensityEstimation.stan")
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan <- stan_model(file = "Hyvarinen_GaussianKernelDensityEstimation_w_reparam.stan")
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan <- stan_model(file = "Hyvarinen_GaussianKernelDensityEstimation_w_expPrior.stan")
+
+KL_MixtureBayesnorm_NIW_stan <- stan_model(file = "KL_MixtureBayesnorm_NIW.stan")
+
 ```
 
 ## Gaussian Mixture Datasets
@@ -119,7 +177,7 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_claw, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_claw_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_claw
 , init = list("sigma2" = 0.1)
@@ -136,20 +194,20 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, cl
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_claw, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_claw, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_claw <- list(n = n_obs, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_claw
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_claw
+, init = list("sigma2" = 0.1, "omega" = 1)
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_claw <- f_KDE_Gaussian_vect(x_seq, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_claw <- f_KDE_Gaussian_vect(x_seq, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[2])}, lower = -Inf, upper = Inf)
 
 ```
 
@@ -165,6 +223,52 @@ dp_claw <- Fit(dp_claw, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_claw, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_claw_fit <-  bfnormmix(x = claw_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_claw_fit)$logbf.niw## local
+postProb(cbFiniteMixture_claw_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_claw_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_claw, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_claw <- list(n = n_obs, K = hat_k_local, y = matrix(claw_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_claw_fit@priorpars$g, nu_0 = cbFiniteMixture_claw_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_claw_fit@priorpars$S0), alpha_0 = cbFiniteMixture_claw_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_claw_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_claw)
+
+KL_MixtureBayesnorm_NIW_claw_mu_hat <- KL_MixtureBayesnorm_NIW_claw_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_claw_sigma2_hat <- KL_MixtureBayesnorm_NIW_claw_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_claw_omega_hat <- KL_MixtureBayesnorm_NIW_claw_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_claw, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(claw_n_std, deriv.order = 0) ## default
+KDE_ucv_claw <- dkde(x = claw_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -175,9 +279,13 @@ dgp_density <- function(x){sd(claw_n)*dnorm_mixture(x = sd(claw_n)*x + mean(claw
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(claw_n), s = sd(claw_n), mus = c(0, seq(-1, 1, by = 0.5)), sigma2s = c(1, rep(0.01, 5)), ws = c(0.5, rep(0.1, 5)))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_claw_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_claw_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_claw_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = density(claw_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_claw$clusterParameters[[1]]), sigma2s = c(dp_claw$clusterParameters[[2]])^2, ws = dp_claw$weights)}
+
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = claw_n_std, sigma2 = KDE_ucv_claw$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_claw_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_claw_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_claw_omega_hat)}
 
 FisherDivergence_claw_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -187,7 +295,7 @@ FisherDivergence_claw_hyv_KDE
 
 FisherDivergence_claw_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(claw_n_std), upper = max(claw_n_std))
 FisherDivergence_claw_hyv_KDE_w
 
@@ -202,6 +310,18 @@ FisherDivergence_claw_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(claw_n_std), upper = max(claw_n_std))
 FisherDivergence_claw_DPMM
+
+FisherDivergence_claw_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_Mix
+
+FisherDivergence_claw_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(claw_n_std), upper = max(claw_n_std))
+FisherDivergence_claw_KDE_ucv
 
 ```
 
@@ -219,10 +339,14 @@ hist(claw_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.65), main = "cla
 x_seq <- seq(-5, 5, length.out = 1000)
 #plot
 points(x_seq, f_KDE_Gaussian_eval_claw/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_claw/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_claw/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(claw_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_claw$weights, means = dp_claw$clusterParameters[[1]], sds = dp_claw$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 points(x_seq, sd(claw_n)*dnorm_mixture(x = sd(claw_n)*x_seq + mean(claw_n), mus = c(0, seq(-1, 1, by = 0.5)), sigma2s = c(1, rep(0.01, 5)), ws = c(0.5, rep(0.1, 5))), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_claw$eval.points, KDE_ucv_claw$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_claw_omega_hat, means = KL_MixtureBayesnorm_NIW_claw_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_claw_sigma2_hat)), lwd = 3, type = "l", col = "pink")
+points(KDE_ucv_claw$eval.points, KDE_ucv_claw$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_claw_omega_hat, means = KL_MixtureBayesnorm_NIW_claw_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_claw_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
 
 ```
@@ -237,7 +361,7 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_bimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_bimodal
 , init = list("sigma2" = 0.1)
@@ -255,19 +379,19 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, bi
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_bimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_bimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_bimodal <- list(n = n_obs, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_bimodal
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_bimodal
+, init = list("sigma2" = 0.1, "omega" = 1)
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_bimodal <- f_KDE_Gaussian_vect(x_seq, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_bimodal <- f_KDE_Gaussian_vect(x_seq, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[2])}, lower = -Inf, upper = Inf)
 
 ```
 
@@ -283,6 +407,52 @@ dp_bimodal <- Fit(dp_bimodal, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_bimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_bimodal_fit <-  bfnormmix(x = bimodal_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_bimodal_fit)$logbf.niw## local
+postProb(cbFiniteMixture_bimodal_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_bimodal_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_bimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_bimodal <- list(n = n_obs, K = hat_k_local, y = matrix(bimodal_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_bimodal_fit@priorpars$g, nu_0 = cbFiniteMixture_bimodal_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_bimodal_fit@priorpars$S0), alpha_0 = cbFiniteMixture_bimodal_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_bimodal_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_bimodal)
+
+KL_MixtureBayesnorm_NIW_bimodal_mu_hat <- KL_MixtureBayesnorm_NIW_bimodal_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_bimodal_sigma2_hat <- KL_MixtureBayesnorm_NIW_bimodal_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_bimodal_omega_hat <- KL_MixtureBayesnorm_NIW_bimodal_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_bimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(bimodal_n_std, deriv.order = 0) ## default
+KDE_ucv_bimodal <- dkde(x = bimodal_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -293,9 +463,13 @@ dgp_density <- function(x){sd(bimodal_n)*dnorm_mixture(x = sd(bimodal_n)*x + mea
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(bimodal_n), s = sd(bimodal_n), mus = c(-1.5, 1.5), sigma2s = c(1/4, 1/4), ws = c(0.5, 0.5))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_bimodal_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_bimodal_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_bimodal_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = density(bimodal_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_bimodal$clusterParameters[[1]]), sigma2s = c(dp_bimodal$clusterParameters[[2]])^2, ws = dp_bimodal$weights)}
+
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = bimodal_n_std, sigma2 = KDE_ucv_bimodal$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_bimodal_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_bimodal_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_bimodal_omega_hat)}
 
 FisherDivergence_bimodal_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -305,7 +479,7 @@ FisherDivergence_bimodal_hyv_KDE
 
 FisherDivergence_bimodal_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(bimodal_n_std), upper = max(bimodal_n_std))
 FisherDivergence_bimodal_hyv_KDE_w
 
@@ -320,6 +494,18 @@ FisherDivergence_bimodal_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(bimodal_n_std), upper = max(bimodal_n_std))
 FisherDivergence_bimodal_DPMM
+
+FisherDivergence_bimodal_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_Mix
+
+FisherDivergence_bimodal_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(bimodal_n_std), upper = max(bimodal_n_std))
+FisherDivergence_bimodal_KDE_ucv
 
 ```
 
@@ -336,10 +522,12 @@ par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
 hist(bimodal_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.75), main = "bimodal", xlab = "$x$")
 x_seq <- seq(-5, 5, length.out = 1000)
 points(x_seq, f_KDE_Gaussian_eval_bimodal/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_bimodal/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_bimodal/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(bimodal_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_bimodal$weights, means = dp_bimodal$clusterParameters[[1]], sds = dp_bimodal$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 points(x_seq, sd(bimodal_n)*dnorm_mixture(x = sd(bimodal_n)*x_seq + mean(bimodal_n), mus = c(-1.5, 1.5), sigma2s = c(1/4, 1/4), ws = c(0.5, 0.5)), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_bimodal$eval.points, KDE_ucv_bimodal$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_bimodal_omega_hat, means = KL_MixtureBayesnorm_NIW_bimodal_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_bimodal_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
 
 ```
@@ -354,7 +542,7 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_trimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)#1/(10*sqrt(5*n_obs)))
+Hyvarinen_GaussianKernelDensityEstimation_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_trimodal
 , init = list("sigma2" = 0.1)
@@ -372,19 +560,19 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, tr
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_trimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_trimodal, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_trimodal <- list(n = n_obs, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_trimodal
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_trimodal
+, init = list("sigma2" = 0.1, "omega" = 1)
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_trimodal <- f_KDE_Gaussian_vect(x_seq, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_trimodal <- f_KDE_Gaussian_vect(x_seq, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[2])}, lower = -Inf, upper = Inf)
 ```
 
 ### R's DPpackage
@@ -398,6 +586,52 @@ dp_trimodal <- Fit(dp_trimodal, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_trimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_trimodal_fit <-  bfnormmix(x = trimodal_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_trimodal_fit)$logbf.niw## local
+postProb(cbFiniteMixture_trimodal_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_trimodal_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_trimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_trimodal <- list(n = n_obs, K = hat_k_local, y = matrix(trimodal_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_trimodal_fit@priorpars$g, nu_0 = cbFiniteMixture_trimodal_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_trimodal_fit@priorpars$S0), alpha_0 = cbFiniteMixture_trimodal_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_trimodal_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_trimodal)
+
+KL_MixtureBayesnorm_NIW_trimodal_mu_hat <- KL_MixtureBayesnorm_NIW_trimodal_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_trimodal_sigma2_hat <- KL_MixtureBayesnorm_NIW_trimodal_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_trimodal_omega_hat <- KL_MixtureBayesnorm_NIW_trimodal_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_trimodal, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(trimodal_n_std, deriv.order = 0) ## default
+KDE_ucv_trimodal <- dkde(x = trimodal_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -408,9 +642,13 @@ dgp_density <- function(x){sd(trimodal_n)*dnorm_mixture(x = sd(trimodal_n)*x + m
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(trimodal_n), s = sd(trimodal_n), mus = c(-1.2, 1.2, 0), sigma2s = c(9/25, 9/25, 1/16), ws = c(0.45, 0.45, 0.1))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_trimodal_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_trimodal_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_trimodal_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = density(trimodal_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_trimodal$clusterParameters[[1]]), sigma2s = c(dp_trimodal$clusterParameters[[2]])^2, ws = dp_trimodal$weights)}
+
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = trimodal_n_std, sigma2 = KDE_ucv_trimodal$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_trimodal_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_trimodal_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_trimodal_omega_hat)}
 
 FisherDivergence_trimodal_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -420,7 +658,7 @@ FisherDivergence_trimodal_hyv_KDE
 
 FisherDivergence_trimodal_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(trimodal_n_std), upper = max(trimodal_n_std))
 FisherDivergence_trimodal_hyv_KDE_w
 
@@ -435,6 +673,19 @@ FisherDivergence_trimodal_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(trimodal_n_std), upper = max(trimodal_n_std))
 FisherDivergence_trimodal_DPMM
+
+FisherDivergence_trimodal_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_Mix
+
+FisherDivergence_trimodal_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(trimodal_n_std), upper = max(trimodal_n_std))
+FisherDivergence_trimodal_KDE_ucv
+
 
 ```
 
@@ -451,10 +702,12 @@ par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
 hist(trimodal_n_std, probability = TRUE, breaks = 50, main = "trimodal", xlab = "$x$")
 x_seq <- seq(-5, 5, length.out = 1000)
 points(x_seq, f_KDE_Gaussian_eval_trimodal/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_trimodal/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_trimodal/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(trimodal_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_trimodal$weights, means = dp_trimodal$clusterParameters[[1]], sds = dp_trimodal$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 points(x_seq, sd(trimodal_n)*dnorm_mixture(x = sd(trimodal_n)*x_seq + mean(trimodal_n), mus = c(-1.2, 1.2, 0), sigma2s = c(9/25, 9/25, 1/16), ws = c(0.45, 0.45, 0.1)), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_trimodal$eval.points, KDE_ucv_trimodal$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_trimodal_omega_hat, means = KL_MixtureBayesnorm_NIW_trimodal_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_trimodal_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
 ```
 
@@ -469,7 +722,7 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_skewed, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_skewed_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_skewed
 , init = list("sigma2" = 0.1)
@@ -487,19 +740,19 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, sk
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_skewed, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_skewed, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_skewed <- list(n = n_obs, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_skewed
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_skewed
+, init = list("sigma2" = 0.1, "omega" = 1)
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_skewed <- f_KDE_Gaussian_vect(x_seq, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_skewed <- f_KDE_Gaussian_vect(x_seq, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[2])}, lower = -Inf, upper = Inf)
 
 ```
 
@@ -514,6 +767,52 @@ dp_skewed <- Fit(dp_skewed, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_skewed, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_skewed_fit <-  bfnormmix(x = skewed_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_skewed_fit)$logbf.niw## local
+postProb(cbFiniteMixture_skewed_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_skewed_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_skewed, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_skewed <- list(n = n_obs, K = hat_k_local, y = matrix(skewed_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_skewed_fit@priorpars$g, nu_0 = cbFiniteMixture_skewed_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_skewed_fit@priorpars$S0), alpha_0 = cbFiniteMixture_skewed_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_skewed_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_skewed)
+
+KL_MixtureBayesnorm_NIW_skewed_mu_hat <- KL_MixtureBayesnorm_NIW_skewed_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_skewed_sigma2_hat <- KL_MixtureBayesnorm_NIW_skewed_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_skewed_omega_hat <- KL_MixtureBayesnorm_NIW_skewed_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_skewed, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(skewed_n_std, deriv.order = 0) ## default
+KDE_ucv_skewed <- dkde(x = skewed_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -525,9 +824,13 @@ dgp_density <- function(x){sd(skewed_n)*dnorm_mixture(x = sd(skewed_n)*x + mean(
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(skewed_n), s = sd(skewed_n), mus = 3 * (sig - 1), sigma2s = sig^2, ws = rep(1/8, 8))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_skewed_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_skewed_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_skewed_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = density(skewed_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_skewed$clusterParameters[[1]]), sigma2s = c(dp_skewed$clusterParameters[[2]])^2, ws = dp_skewed$weights)}
+
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = skewed_n_std, sigma2 = KDE_ucv_skewed$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_skewed_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_skewed_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_skewed_omega_hat)}
 
 FisherDivergence_skewed_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -537,7 +840,7 @@ FisherDivergence_skewed_hyv_KDE
 
 FisherDivergence_skewed_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(skewed_n_std), upper = max(skewed_n_std))
 FisherDivergence_skewed_hyv_KDE_w
 
@@ -552,6 +855,19 @@ FisherDivergence_skewed_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(skewed_n_std), upper = max(skewed_n_std))
 FisherDivergence_skewed_DPMM
+
+FisherDivergence_skewed_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_Mix
+
+FisherDivergence_skewed_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(skewed_n_std), upper = max(skewed_n_std))
+FisherDivergence_skewed_KDE_ucv
+
 
 ```
 
@@ -569,13 +885,15 @@ par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
 hist(skewed_n_std, probability = TRUE, breaks = 50, ylim = c(0, 1.85), main = "skewed", xlab = "$x$")
 x_seq <- seq(-5, 5, length.out = 1000)
 points(x_seq, f_KDE_Gaussian_eval_skewed/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_skewed/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_skewed/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(skewed_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_skewed$weights, means = dp_skewed$clusterParameters[[1]], sds = dp_skewed$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 sig <- ((2/3)^((0:7)))
 points(x_seq, sd(skewed_n)*dnorm_mixture(x = sd(skewed_n)*x_seq + mean(skewed_n), mus = 3 * (sig - 1), sigma2s = sig^2, ws = rep(1/8, 8)), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_skewed$eval.points, KDE_ucv_skewed$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_skewed_omega_hat, means = KL_MixtureBayesnorm_NIW_skewed_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_skewed_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
-legend("topright",c("$g(y)$", "DPMM", "KDE (Silverman)", "KDE ($\\mathcal{H}$-posterior)", "KDE - $w$ ($\\mathcal{H}$-posterior)"), col = c("grey", "red", "orange", "blue", "purple"), lwd = rep(3, 5), lty = c(2, rep(1, 4)), bty = "n", cex = 1.25)
+legend("topright",c("KDE ($\\mathcal{H}$-posterior)", "KDE - $w$ ($\\mathcal{H}$-posterior)", "KDE (Silverman)", "DPMM", "Finite Mixture Model", "KDE (ucv)" , "$g(y)$"), col = c("blue", "purple", "orange", "red", "pink", "green", "grey" ), lwd = rep(3, 7), lty = c(rep(1, 6), 2), bty = "n", cex = 1)
 
 ```
 
@@ -590,10 +908,10 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_asymmetric, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_asymmetric <- list(n = n_obs, y = matrix(asymmetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_data_asymmetric <- list(n = n_obs, y = matrix(asymmetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_asymmetric_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_asymmetric
- , init = list("sigma2" = 0.05)                                                                               
+ , init = list("sigma2" = 0.002)                                                                               
 )
 x_seq <- seq(-5, 5, length.out = 1000)
 f_KDE_Gaussian_eval_asymmetric <- f_KDE_Gaussian_vect(x_seq, asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_asymmetric_optim$par[1], w =  1)
@@ -607,19 +925,19 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, as
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_asymmetric, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_asymmetric, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_asymmetric <- list(n = n_obs, y = matrix(asymmetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_asymmetric <- list(n = n_obs, y = matrix(asymmetric_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_asymmetric
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_asymmetric
+, init = list("sigma2" = 0.007987037, "omega" = 0.007987037/0.007697229) 
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_asymmetric <- f_KDE_Gaussian_vect(x_seq, asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_asymmetric <- f_KDE_Gaussian_vect(x_seq, asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[2])}, lower = -Inf, upper = Inf)
 
 ```
 
@@ -634,6 +952,52 @@ dp_asymmetric <- Fit(dp_asymmetric, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_asymmetric, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_asymmetric_fit <-  bfnormmix(x = asymmetric_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_asymmetric_fit)$logbf.niw## local
+postProb(cbFiniteMixture_asymmetric_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_asymmetric_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_asymmetric, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_asymmetric <- list(n = n_obs, K = hat_k_local, y = matrix(asymmetric_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_asymmetric_fit@priorpars$g, nu_0 = cbFiniteMixture_asymmetric_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_asymmetric_fit@priorpars$S0), alpha_0 = cbFiniteMixture_asymmetric_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_asymmetric_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_asymmetric)
+
+KL_MixtureBayesnorm_NIW_asymmetric_mu_hat <- KL_MixtureBayesnorm_NIW_asymmetric_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_asymmetric_sigma2_hat <- KL_MixtureBayesnorm_NIW_asymmetric_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_asymmetric_omega_hat <- KL_MixtureBayesnorm_NIW_asymmetric_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_asymmetric, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(asymmetric_n_std, deriv.order = 0) ## default
+KDE_ucv_asymmetric <- dkde(x = asymmetric_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -644,10 +1008,13 @@ dgp_density <- function(x){sd(asymmetric_n)*dnorm_mixture(x = sd(asymmetric_n)*x
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(asymmetric_n), s = sd(asymmetric_n), mus = c(0, 1.5), sigma2s = c(1, 1/9), ws = c(0.75, 0.25))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_asymmetric_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_asymmetric_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymmetric_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_asymmetric_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymmetric_n_std, sigma2 = density(asymmetric_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_asymmetric$clusterParameters[[1]]), sigma2s = c(dp_asymmetric$clusterParameters[[2]])^2, ws = dp_asymmetric$weights)}
 
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = asymmetric_n_std, sigma2 = KDE_ucv_asymmetric$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_asymmetric_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_asymmetric_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_asymmetric_omega_hat)}
 
 FisherDivergence_asymmetric_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -657,7 +1024,7 @@ FisherDivergence_asymmetric_hyv_KDE
 
 FisherDivergence_asymmetric_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(asymmetric_n_std), upper = max(asymmetric_n_std))
 FisherDivergence_asymmetric_hyv_KDE_w
 
@@ -672,6 +1039,18 @@ FisherDivergence_asymmetric_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(asymmetric_n_std), upper = max(asymmetric_n_std))
 FisherDivergence_asymmetric_DPMM
+
+FisherDivergence_asymmetric_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(asymmetric_n_std), upper = max(asymmetric_n_std))
+FisherDivergence_asymmetric_Mix
+
+FisherDivergence_asymmetric_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(asymmetric_n_std), upper = max(asymmetric_n_std))
+FisherDivergence_asymmetric_KDE_ucv
 
 ```
 
@@ -689,12 +1068,13 @@ par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
 hist(asymmetric_n_std, probability = TRUE, breaks = 50, ylim = c(0, 0.65), main = "asymmetric", xlab = "$x$")
 x_seq <- seq(-5, 5, length.out = 1000)
 points(x_seq, f_KDE_Gaussian_eval_asymmetric/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_asymmetric/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_asymmetric/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(asymmetric_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_asymmetric$weights, means = dp_asymmetric$clusterParameters[[1]], sds = dp_asymmetric$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 points(x_seq, sd(asymmetric_n)*dnorm_mixture(x = sd(asymmetric_n)*x_seq + mean(asymmetric_n), mus = c(0, 1.5), sigma2s = c(1, 1/9), ws = c(0.75, 0.25)), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_asymmetric$eval.points, KDE_ucv_asymmetric$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_asymmetric_omega_hat, means = KL_MixtureBayesnorm_NIW_asymmetric_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_asymmetric_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
-legend("topleft",c("KDE ($\\mathcal{H}$-posterior)", "KDE - $w$ ($\\mathcal{H}$-posterior)", "KDE (Silverman)", "DPMM" , "$g(y)$"), col = c("blue", "purple", "orange", "red", "grey" ), lwd = rep(3, 5), lty = c(rep(1, 4), 2), bty = "n", cex = 1.25)
 
 ```
 
@@ -708,7 +1088,7 @@ MAP estimates under the $\mathcal{H}$-posterior for the kernel density model wit
 
 ```{r Hyvarinen_GaussianKernelDensityEstimation_Optimising_kurtotic, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_set, sig_p2 = b_0_set, w = 1, sigma2_lower = 0)
 
 Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_stan, data = Hyvarinen_GaussianKernelDensityEstimation_data_kurtotic
 , init = list("sigma2" = 0.1)
@@ -726,19 +1106,19 @@ KDE_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, ku
 
 MAP estimates under the $\mathcal{H}$-posterior for the kernel density model estimating $w$.
 
-```{r Hyvarinen_GaussianKernelDensityEstimation_w_reparam_Optimising_kurtotic, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
+```{r Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_Optimising_kurtotic, include=TRUE,echo=TRUE, eval=TRUE,cache=TRUE}
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0, sig_p2 = b_0, phi_p1 = 0, phi_p2 = 1, w = 1, sigma2_lower = n_obs^(-1/5)/100)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_kurtotic <- list(n = n_obs, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), sig_p1 = a_0_w_set, sig_p2 = b_0_w_set, omega_p1 = c_0_w_set, w = 1, sigma2_lower = 0)
 
-Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_data_kurtotic
-, init = list("sigma2" = 0.1, "phi" = 0.1)
+Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim <- optimizing(object = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_stan, data = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_data_kurtotic
+, init = list("sigma2" = 0.1, "omega" = 1)
 )
 
 x_seq <- seq(-5, 5, length.out = 1000)
-f_KDE_w_reparam_Gaussian_eval_kurtotic <- f_KDE_Gaussian_vect(x_seq, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])
+f_KDE_w_expPrior_Gaussian_eval_kurtotic <- f_KDE_Gaussian_vect(x_seq, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[2])
 
 
-KDE_w_reparam_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] +  Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])}, lower = -Inf, upper = Inf)
+KDE_w_expPrior_predictive_normaliser <- integrate(f = function(y){f_KDE_Gaussian_vect(y, kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[2])}, lower = -Inf, upper = Inf)
 
 ```
 
@@ -753,6 +1133,52 @@ dp_kurtotic <- Fit(dp_kurtotic, N_mcmc, progressBar = FALSE)
 
 ```
 
+### mombf finite mixture model
+
+Using *mombf* to choose the number of finite Gaussian mixture components maximising the marginal likelihood and then estimating the MAP mixture model with this many components. 
+
+Estimating the optimal $k$ according to the marginal likelihood.
+
+```{r cbFiniteMixture_learnK_kurtotic, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+k_vect <- 1:10
+
+cbFiniteMixture_kurtotic_fit <-  bfnormmix(x = kurtotic_n_std, k = k_vect)
+
+postProb(cbFiniteMixture_kurtotic_fit)$logbf.niw## local
+postProb(cbFiniteMixture_kurtotic_fit)$logbf.momiw## Non-local
+
+hat_k_local <- which.max(postProb(cbFiniteMixture_kurtotic_fit)$logbf.niw)
+
+```
+
+Given $k$, estimating MAP model parameters.
+
+```{r cbFiniteMixture_learnTheta_kurtotic, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+KL_MixtureBayesnorm_NIW_data_kurtotic <- list(n = n_obs, K = hat_k_local, y = matrix(kurtotic_n_std, nrow = n_obs, ncol = 1), mu_0 = rep(0, hat_k_local), kappa = cbFiniteMixture_kurtotic_fit@priorpars$g, nu_0 = cbFiniteMixture_kurtotic_fit@priorpars$nu0, S_0 = drop(cbFiniteMixture_kurtotic_fit@priorpars$S0), alpha_0 = cbFiniteMixture_kurtotic_fit@priorpars$q.niw)
+
+KL_MixtureBayesnorm_NIW_kurtotic_optim <- optimizing(object = KL_MixtureBayesnorm_NIW_stan, data = KL_MixtureBayesnorm_NIW_data_kurtotic)
+
+KL_MixtureBayesnorm_NIW_kurtotic_mu_hat <- KL_MixtureBayesnorm_NIW_kurtotic_optim$par[1:hat_k_local]
+KL_MixtureBayesnorm_NIW_kurtotic_sigma2_hat <- KL_MixtureBayesnorm_NIW_kurtotic_optim$par[hat_k_local + 1:hat_k_local]
+KL_MixtureBayesnorm_NIW_kurtotic_omega_hat <- KL_MixtureBayesnorm_NIW_kurtotic_optim$par[3*hat_k_local - 1 + 1:hat_k_local]
+
+```
+
+### KDE - unbiased cross-validation bandwidth
+
+Kernel density estimation using unbiased cross-validation to estimate the bandwidth implemented in the *kedd* package.
+
+```{r KDE_ucv_kurtotic, include=TRUE,echo=TRUE, eval=TRUE, cache=TRUE}
+
+x_seq <- seq(-5, 5, length.out = 1000)
+
+#h.ucv(kurtotic_n_std, deriv.order = 0) ## default
+KDE_ucv_kurtotic <- dkde(x = kurtotic_n_std, y = x_seq, deriv.order = 0)
+
+```
+
 ### Fisher's Divergence Estimation
 
 Estimating Fisher's divergence to the true underlying data generating density. Note: these were estimated over support of the observed data for all methods, rather than the support of the underlying $g(y)$.
@@ -763,9 +1189,13 @@ dgp_density <- function(x){sd(kurtotic_n)*dnorm_mixture(x = sd(kurtotic_n)*x + m
 grad_log_dgp_density <- function(x){grad_log_dnorm_mixture_std(x, xbar = mean(kurtotic_n), s = sd(kurtotic_n), mus = c(0, 0), sigma2s = c(1, 0.01), ws = c(2/3, 1/3))}
 
 grad_log_f_hyv_KDE <- function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_kurtotic_optim$par, w = 1)}
-grad_log_f_hyv_KDE_w_reparam <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1], w = 1 + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[1] + Hyvarinen_GaussianKernelDensityEstimation_w_reparam_kurtotic_optim$par[2])}
+grad_log_f_hyv_KDE_w_expPrior <-function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[1], w = Hyvarinen_GaussianKernelDensityEstimation_w_expPrior_kurtotic_optim$par[2])}
 grad_log_f_KDE <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = density(kurtotic_n_std)$bw^2, w = 1)}
 grad_log_f_DPMM <- function(x){grad_log_dnorm_mixture(x, mus = c(dp_kurtotic$clusterParameters[[1]]), sigma2s = c(dp_kurtotic$clusterParameters[[2]])^2, ws = dp_kurtotic$weights)}
+
+grad_log_f_KDE_ucv <-  function(x){grad_log_f_KDE_Gaussian_vect(x, data = kurtotic_n_std, sigma2 = KDE_ucv_kurtotic$h^2, w = 1)}
+
+grad_log_f_Mix <- function(x){grad_log_dnorm_mixture(x, mus = c(KL_MixtureBayesnorm_NIW_kurtotic_mu_hat), sigma2s = KL_MixtureBayesnorm_NIW_kurtotic_sigma2_hat, ws = KL_MixtureBayesnorm_NIW_kurtotic_omega_hat)}
 
 FisherDivergence_kurtotic_hyv_KDE <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
@@ -775,7 +1205,7 @@ FisherDivergence_kurtotic_hyv_KDE
 
 FisherDivergence_kurtotic_hyv_KDE_w <- FisherDivergence(g = dgp_density, 
         grad_log_g = grad_log_dgp_density, 
-        grad_log_f = grad_log_f_hyv_KDE_w_reparam, 
+        grad_log_f = grad_log_f_hyv_KDE_w_expPrior, 
         lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
 FisherDivergence_kurtotic_hyv_KDE_w
 
@@ -790,6 +1220,18 @@ FisherDivergence_kurtotic_DPMM <- FisherDivergence(g = dgp_density,
         grad_log_f = grad_log_f_DPMM, 
         lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
 FisherDivergence_kurtotic_DPMM
+
+FisherDivergence_kurtotic_Mix <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_Mix, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_Mix
+
+FisherDivergence_kurtotic_KDE_ucv <- FisherDivergence(g = dgp_density, 
+        grad_log_g = grad_log_dgp_density, 
+        grad_log_f = grad_log_f_KDE_ucv, 
+        lower = min(kurtotic_n_std), upper = max(kurtotic_n_std))
+FisherDivergence_kurtotic_KDE_ucv
 
 ```
 
@@ -806,10 +1248,12 @@ par(cex.lab = 1.25, cex.axis = 1.25, cex.main = 1.25)
 hist(kurtotic_n_std, probability = TRUE, breaks = 50, ylim = c(0, 1.3), xlim = c(-3, 3), main = "kurtotic", xlab = "$x$")
 x_seq <- seq(-5, 5, length.out = 1000)
 points(x_seq, f_KDE_Gaussian_eval_kurtotic/KDE_predictive_normaliser$value, lwd = 3, type = "l", col = "blue", xlim = c(-5, 5), ylim = c(0, 0.3))
-points(x_seq, f_KDE_w_reparam_Gaussian_eval_kurtotic/KDE_w_reparam_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
+points(x_seq, f_KDE_w_expPrior_Gaussian_eval_kurtotic/KDE_w_expPrior_predictive_normaliser$value, lwd = 3, type = "l", col = "purple")
 lines(density(kurtotic_n_std), col = "orange", lwd = 3)
 points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = dp_kurtotic$weights, means = dp_kurtotic$clusterParameters[[1]], sds = dp_kurtotic$clusterParameters[[2]]), lwd = 3, type = "l", col = "red")
 points(x_seq, sd(kurtotic_n)*dnorm_mixture(x = sd(kurtotic_n)*x_seq + mean(kurtotic_n), mus = c(0, 0), sigma2s = c(1, 0.01), ws = c(2/3, 1/3)), lwd = 3, col = "grey", lty = 2, type = "l")
+points(KDE_ucv_kurtotic$eval.points, KDE_ucv_kurtotic$est.fx, lwd = 3, col = "green", lty = 1, type = "l")
+points(x_seq, dnormDPmixture_MAP(x = x_seq, weights = KL_MixtureBayesnorm_NIW_kurtotic_omega_hat, means = KL_MixtureBayesnorm_NIW_kurtotic_mu_hat, sds = sqrt(KL_MixtureBayesnorm_NIW_kurtotic_sigma2_hat)), lwd = 3, type = "l", col = "pink")
 box()
 
 ```
@@ -817,26 +1261,29 @@ box()
 
 ## Comparison of all 
 
-+ xtabe gives us latex 
-+ kable put the table in Rmarkdown
+Producing Tables 1 and A.1 of the paper.
+
++ xtable provides the latex code
++ kable shows the table in Rmarkdown
 
 ```{r data_comparison, include=TRUE,echo=TRUE, eval=TRUE,cache=FALSE, fig.height = 3, fig.width = 5, dev = "tikz"} 
 
-colNames <- c("KDE Silverman1986", "DPMM", "Hyvarinen KDE", "Hyvarinen KDE - w")
+colNames <- c("KDE Silverman1986", "KDE UCV", "DPMM", "Finite Mixture Model", "Hyvarinen KDE", "Hyvarinen KDE - w")
 rowNames <- c("bimodal", "claw", "trimodal", "skewed", "asymmetric", "kurtotic")
 
 
-FisherDivergences_bimodal <- c(FisherDivergence_bimodal_KDE$value, FisherDivergence_bimodal_DPMM$value, FisherDivergence_bimodal_hyv_KDE$value, FisherDivergence_bimodal_hyv_KDE_w$value)
+FisherDivergences_bimodal <- c(FisherDivergence_bimodal_KDE$value, FisherDivergence_bimodal_KDE_ucv$value, FisherDivergence_bimodal_DPMM$value, FisherDivergence_bimodal_Mix$value, FisherDivergence_bimodal_hyv_KDE$value, FisherDivergence_bimodal_hyv_KDE_w$value)
 
-FisherDivergences_claw <- c(FisherDivergence_claw_KDE$value, FisherDivergence_claw_DPMM$value, FisherDivergence_claw_hyv_KDE$value, FisherDivergence_claw_hyv_KDE_w$value)
+FisherDivergences_kurtotic <- c(FisherDivergence_kurtotic_KDE$value, FisherDivergence_kurtotic_KDE_ucv$value, FisherDivergence_kurtotic_DPMM$value, FisherDivergence_kurtotic_Mix$value, FisherDivergence_kurtotic_hyv_KDE$value, FisherDivergence_kurtotic_hyv_KDE_w$value)
 
-FisherDivergences_trimodal <- c(FisherDivergence_trimodal_KDE$value, FisherDivergence_trimodal_DPMM$value, FisherDivergence_trimodal_hyv_KDE$value, FisherDivergence_trimodal_hyv_KDE_w$value)
+FisherDivergences_claw <- c(FisherDivergence_claw_KDE$value, FisherDivergence_claw_KDE_ucv$value, FisherDivergence_claw_DPMM$value, FisherDivergence_claw_Mix$value, FisherDivergence_claw_hyv_KDE$value, FisherDivergence_claw_hyv_KDE_w$value)
 
-FisherDivergences_skewed <- c(FisherDivergence_skewed_KDE$value, FisherDivergence_skewed_DPMM$value, FisherDivergence_skewed_hyv_KDE$value, FisherDivergence_skewed_hyv_KDE_w$value)
+FisherDivergences_trimodal <- c(FisherDivergence_trimodal_KDE$value, FisherDivergence_trimodal_KDE_ucv$value, FisherDivergence_trimodal_DPMM$value, FisherDivergence_trimodal_Mix$value, FisherDivergence_trimodal_hyv_KDE$value, FisherDivergence_trimodal_hyv_KDE_w$value)
 
-FisherDivergences_asymmetric <- c(FisherDivergence_asymmetric_KDE$value, FisherDivergence_asymmetric_DPMM$value, FisherDivergence_asymmetric_hyv_KDE$value, FisherDivergence_asymmetric_hyv_KDE_w$value)
+FisherDivergences_skewed <- c(FisherDivergence_skewed_KDE$value, FisherDivergence_skewed_KDE_ucv$value, FisherDivergence_skewed_DPMM$value, FisherDivergence_skewed_Mix$value, FisherDivergence_skewed_hyv_KDE$value, FisherDivergence_skewed_hyv_KDE_w$value)
 
-FisherDivergences_kurtotic <- c(FisherDivergence_kurtotic_KDE$value, FisherDivergence_kurtotic_DPMM$value, FisherDivergence_kurtotic_hyv_KDE$value, FisherDivergence_kurtotic_hyv_KDE_w$value)
+FisherDivergences_asymmetric <- c(FisherDivergence_asymmetric_KDE$value, FisherDivergence_asymmetric_KDE_ucv$value, FisherDivergence_asymmetric_DPMM$value, FisherDivergence_asymmetric_Mix$value, FisherDivergence_asymmetric_hyv_KDE$value, FisherDivergence_asymmetric_hyv_KDE_w$value)
+
   
   
 FisherDivergences <- rbind(FisherDivergences_bimodal, FisherDivergences_claw, FisherDivergences_trimodal, FisherDivergences_skewed, FisherDivergences_asymmetric, FisherDivergences_kurtotic)
